@@ -1,0 +1,7 @@
+{
+    "input_device_index": 8,
+    "output_device_index": 0,
+    "input_channels": 2,
+    "output_channels": 8,
+    "samplerate": 44100
+}

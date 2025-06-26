@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "audioviz"
+version = "0.1.0"
+
+# dependencies = [
+#     "librosa",
+#     "matplotlib",
+#     "numpy",
+#     "sounddevice",
+#     "pyqtgraph",
+#     "pyqt"
+# ]
+
+# [tool.setuptools.packages.find]
+# where = ["src"]
