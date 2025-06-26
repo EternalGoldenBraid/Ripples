@@ -97,3 +97,8 @@ A phone-recorded clip is perfectly fine for now.
 ## 📄 License
 
 MIT — see LICENSE.txt.
+
+## 📫 TODO:
+- [ ] Add more excitation sources (e.g., video, heart pulse)
+- [ ] Write CONTRIBUTING.md
+- [ ] Clean `main.py` and `*.yaml` or structured configs.
