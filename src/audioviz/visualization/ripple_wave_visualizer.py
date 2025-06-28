@@ -66,6 +66,7 @@ class RippleWaveVisualizer(VisualizerBase):
         self.excitation_sources: Dict[str, ExcitationSourceBase] = {}
         self.use_gpu = use_gpu
         self.xp = cp if use_gpu else np
+        self.backend = self.xp
 
         self.plane_size_m = plane_size_m
         self.resolution = resolution

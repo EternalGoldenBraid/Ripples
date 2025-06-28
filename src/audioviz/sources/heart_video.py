@@ -149,9 +149,12 @@ class HeartVideoExcitation(ExcitationSourceBase):
         right  = min(W_out, left + w)
         mask_crop = mask_resized[:bottom-top, :right-left]
 
-        delta = mask_crop - self._prev_mask  if self._prev_mask is not None else mask_crop
-        self._prev_mask = mask_crop.copy()
-        self.out[:] = 0.0
-        self.out[top:bottom,left:right] = delta * self.amplitude
+        # delta = mask_crop - self._prev_mask  if self._prev_mask is not None else mask_crop
+        # self._prev_mask = mask_crop.copy()
+        # self.out[:] = 0.0
+        # self.out[top:bottom,left:right] = delta * self.amplitude
+
+        # self.out[top:bottom,left:right] = mask_crop * self.amplitude
+        self.out[top:bottom, left:right] = self.amplitude * (mask_crop - np.mean(mask_crop))
 
         return self.out

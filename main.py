@@ -1,255 +1,231 @@
-import sys
-import signal
+"""
+AudioRipple – demo launcher
+===========================
+
+Run three visualizers (spectrogram, ripple-field, helix) with any
+combination of:
+
+    • live microphone / interface
+    • prerecorded WAV file
+    • synthetic / heart-video excitations
+
+Edit the `RUN_MODE` and feature flags at the top; no other changes
+needed when you switch setups.
+"""
 from pathlib import Path
-from typing import Union, Optional, Dict
+from typing import Dict, Union
+import signal
+import sys
 
-from PyQt5 import QtWidgets, QtCore
-import qdarkstyle
-
+# Third-party
 import numpy as np
-import cupy as cp
 import librosa as lr
+import qdarkstyle
+from PyQt5 import QtCore, QtWidgets
 from matplotlib import cm
 from matplotlib.colors import Normalize
 from loguru import logger
 
+# Local modules
 from audioviz.audio_processing.audio_processor import AudioProcessor
+from audioviz.utils.audio_devices import select_devices, AudioDeviceDesktop
+from audioviz.utils.guitar_profiles import GuitarProfile
 from audioviz.visualization.spectrogram_visualizer import SpectrogramVisualizer
 from audioviz.visualization.ripple_wave_visualizer import RippleWaveVisualizer
 from audioviz.visualization.pitch_helix_visualizer import PitchHelixVisualizer
-from audioviz.utils.audio_devices import select_devices
-from audioviz.utils.audio_devices import AudioDeviceDesktop 
-from audioviz.utils.guitar_profiles import GuitarProfile  
+
 from audioviz.sources.audio import AudioExcitation
 from audioviz.sources.heart_video import HeartVideoExcitation
-from audioviz.sources.synthetic import (
-    SyntheticPointExcitation,
+from audioviz.sources.synthetic import SyntheticPointExcitation
+
+# -----------------------------------------------------------------------------
+# 1) HIGH-LEVEL SWITCHES
+# -----------------------------------------------------------------------------
+RUN_MODE = "live"        # "live" | "wav" | "headless"
+FLAGS = dict(
+    show_spectrogram=True,
+    show_ripples=True,
+    show_helix=False,
+
+    use_audio_excitation=False,
+    use_heart_video=True,
+    use_synthetic=False,
 )
 
-def main():
-    # --- Config Phase ---
-    
-    is_streaming = True
-    
-    if is_streaming:
-        data = None
-        device_enum = AudioDeviceDesktop
-        config = select_devices(config_file=Path("outputs/audio_devices.json"))
-        sr: Union[int, float] = config["samplerate"]
-    else:
-        data_path: Path = Path("/home/nicklas/Projects/AudioViz/data")
-        audio_file = data_path / "test.wav"
-        data, sr = lr.load(audio_file, sr=None)
-    
-        config = {
-            "input_device_index": None,
-            "input_channels": None,
-            "output_device_index": None,
-            "output_channels": None,
-            "samplerate": sr,
-        }
-    
-    io_config: Dict = {
-        "is_streaming": is_streaming,
+HEART_VIDEO_PATH = Path("Data/GeneratedHearts/heart_mri.mp4")
+WAV_PATH         = Path("data/test.wav")
+
+
+# -----------------------------------------------------------------------------
+# 2) GLOBAL PARAMS
+# -----------------------------------------------------------------------------
+SR_DEFAULT = 44100            # default when not streaming
+N_FFT      = 256
+WINDOW_MS  = 20
+HOP_RATIO  = 1 / 4
+
+RIPPLE_CONF = dict(
+    plane_size_m=(0.30, 0.30),        # physical plane if needed
+    resolution=(1440, 2560),          # (H, W)
+    speed=340.0,
+    amplitude=10.0,
+    damping=0.90,
+    use_gpu=True,
+)
+
+
+# -----------------------------------------------------------------------------
+# 3) MAIN
+# -----------------------------------------------------------------------------
+def main() -> None:
+    # ---------------------------------------------------------------- Config
+    if RUN_MODE == "live":
+        config = select_devices(Path("outputs/audio_devices.json"))
+        sr = config["samplerate"]
+        audio_data = None
+    elif RUN_MODE == "wav":
+        audio_data, sr = lr.load(WAV_PATH, sr=None)
+        config = dict(
+            input_device_index=-1, input_channels=1,
+            output_device_index=-1, output_channels=1,
+            samplerate=sr,
+        )
+    else:  # headless
+        sr, audio_data = SR_DEFAULT, None
+        config = dict(
+            input_device_index=-1, input_channels=1,
+            output_device_index=-1, output_channels=1,
+            samplerate=sr,
+        )
+
+    io_conf: Dict = {
+        "is_streaming": RUN_MODE == "live",
         "input_device_index": config["input_device_index"],
         "input_channels": config["input_channels"],
         "output_device_index": config["output_device_index"],
         "output_channels": config["output_channels"],
         "io_blocksize": 4096,
-        # "io_blocksize": 2048,
-        # "io_blocksize": 1024,
-        # "io_blocksize": 512,
     }
-    
-    # Spectrogram parameters
-    n_fft = 256
-    window_duration = 20  # ms
-    # window_duration = 500  # ms
-    window_length = int((window_duration / 1000) * sr)
-    window_length = 2**int(np.log2(window_length))
-    
-    spectrogram_params = {
-        "n_fft": n_fft,
-        "hop_length": window_length // 4,
-        "n_mels": None,
-        "stft_window": lr.filters.get_window("hann", window_length),
-    }
-    
-    # Spectrogram dynamic range setup
-    if not is_streaming:
-        mel_spectrogram = lr.feature.melspectrogram(
-            n_fft=spectrogram_params["n_fft"],
-            hop_length=spectrogram_params["hop_length"],
-            y=data,
-            sr=sr,
-            n_mels=spectrogram_params["n_mels"]
-        )
-        spectrogram_params["mel_spec_max"] = np.max(mel_spectrogram)
-    else:
-        spectrogram_params["mel_spec_max"] = 0.0
-    
-    # Plotting configs
-    cmap = cm.get_cmap('viridis')
-    norm = Normalize(vmin=-80, vmax=0)
-    plot_update_interval = 100  # ms
-    
-    plotting_config = {
-        "cmap": cmap,
-        "norm": norm,
-        "plot_update_interval": plot_update_interval,
-        "num_samples_in_plot_window": int(5.0 * sr),
-        "waveform_plot_duration": 0.5,
-    }
-    
-    # --- Run Phase ---
-    
+
+    # Spectrogram params
+    win_len = 2 ** int(np.log2((WINDOW_MS / 1000) * sr))
+    spec_params = dict(
+        n_fft=N_FFT,
+        hop_length=int(win_len * HOP_RATIO),
+        n_mels=None,
+        stft_window=lr.filters.get_window("hann", win_len),
+        mel_spec_max=0.0,
+    )
+
+    # ---------------------------------------------------------------- Qt App
     app = QtWidgets.QApplication([])
     app.setStyleSheet(qdarkstyle.load_stylesheet_pyqt5())
-    
-    # Audio processor
+
+    # ---------------------------------------------------------------- Audio IO
     processor = AudioProcessor(
         sr=int(sr),
-        data=data,
-        n_fft=spectrogram_params["n_fft"],
-        hop_length=spectrogram_params["hop_length"],
-        n_mels=spectrogram_params["n_mels"],
-        stft_window=spectrogram_params["stft_window"],
-        num_samples_in_buffer=plotting_config["num_samples_in_plot_window"],
-        is_streaming=io_config["is_streaming"],
-        input_device_index=io_config["input_device_index"],
-        input_channels=io_config["input_channels"] or 1,
-        output_device_index=io_config["output_device_index"],
-        output_channels=io_config["output_channels"] or 1,
-        io_blocksize=io_config["io_blocksize"],
-        number_top_k_frequencies=n_fft//2,
+        data=audio_data,
+        num_samples_in_buffer=int(5 * sr),
+        number_top_k_frequencies=N_FFT // 2,
+        io_blocksize=io_conf["io_blocksize"],
+        **{k: spec_params[k] for k in ("n_fft", "hop_length", "n_mels", "stft_window")},
+        is_streaming=io_conf["is_streaming"],
+        input_device_index=io_conf["input_device_index"],
+        input_channels=io_conf["input_channels"] or 1,
+        output_device_index=io_conf["output_device_index"],
+        output_channels=io_conf["output_channels"] or 1,
     )
-    
-    # Create a processing timer
-    block_duration_ms = (io_config["io_blocksize"] / sr) * 1000
-    processing_timer = QtCore.QTimer()
-    # processing_timer.setInterval(20)  # e.g., 50 Hz
-    processing_timer.setInterval(int(block_duration_ms*(1 - 1e-3))) 
-    processing_timer.timeout.connect(processor.process_pending_audio)
-    processing_timer.start()
-    
-    # Visualizer
-    show_spectrogram = True 
-    if show_spectrogram == True:
-        visualizer = SpectrogramVisualizer(
-            processor=processor,
-            cmap=plotting_config["cmap"],
-            norm=plotting_config["norm"],
-            waveform_plot_duration=plotting_config["waveform_plot_duration"],
-        )
-        visualizer.setWindowTitle("Audio Visualizer")
-        visualizer.resize(800, 600)
-        visualizer.show()
-    
-    # Create Pitch Helix Visualizer (Remnant of another project)
-    show_helix = False
-    if show_helix:
-        standard_guitar = GuitarProfile(
-            open_strings=[82.41, 110.00, 146.83, 196.00, 246.94, 329.63],
-            num_frets=22
-        )
-        
-        dadgad_guitar = GuitarProfile(
-            open_strings=[73.42, 110.00, 146.83, 196.00, 220.00, 293.66],
-            num_frets=22
-        )
-        
-        helix_window = PitchHelixVisualizer(
-            processor=processor,
-            guitar_profile=standard_guitar,
-        )
-        helix_window.setWindowTitle("Pitch Helix Visualizer")
-        helix_window.resize(800, 600)
-        helix_window.show()
-    
-    # Create Ripple Wave Visualizer
-    show_ripples = True
-    ripple_config = {
-        # "use_synthetic": True,  # Set to True for synthetic data
-        "use_synthetic": False,  # Set to True for synthetic data
-        # "plane_size_m": (10.20, 10.20),  # meters
-        "plane_size_m": (0.30, 0.30)*100,  # meters
-        "resolution":  (1440, 2560),  # pixels (H, W)
-        "frequency": 1.0,  # Hz
-        # "amplitude": 1.0,
-        "amplitude": 10.0,
-        # "speed": 1e-4,  # m/s
-        "speed": 340.0,  # m/s
-        # "speed": 34.0,  # m/s
-        "damping": 0.90,  # damping factor
-        # "damping": 0.1,  # damping facto
-        "use_gpu": True,
-    }
-    backend = cp if ripple_config["use_gpu"] else np
-    
-    if show_ripples:
 
+    # Pump raw input queue -> processor
+    timer = QtCore.QTimer()
+    timer.setInterval(int(io_conf["io_blocksize"] / sr * 1000))
+    timer.timeout.connect(processor.process_pending_audio)
+    timer.start()
 
-        ripple_window: RippleWaveVisualizer = RippleWaveVisualizer(
-            **ripple_config
+    # ---------------------------------------------------------------- Visualizers
+    if FLAGS["show_spectrogram"]:
+        spectro = SpectrogramVisualizer(
+            processor,
+            cmap=cm.get_cmap("viridis"),
+            norm=Normalize(vmin=-80, vmax=0),
+            waveform_plot_duration=0.5,
         )
+        spectro.setWindowTitle("Spectrogram")
+        spectro.resize(800, 600)
+        spectro.show()
 
-        # TODO Separate ripple and audio wave excitation configs
-        audio_excitation: AudioExcitation = AudioExcitation(
-            name="Audio Ripple",
-            processor=processor,
-            position=(0.5, 0.5),  # Center of the plane
-            max_frequency=ripple_window.max_frequency,
-            amplitude=ripple_config["amplitude"],
-            speed=ripple_config["speed"],
-            resolution=ripple_config["resolution"],
-            decay_alpha=0.0,  # No decay
-            backend=backend,
-        )
-        # ripple_window.add_excitation_source(audio_excitation)
+    # Ripple window & sources
+    if FLAGS["show_ripples"]:
+        ripple = RippleWaveVisualizer(**RIPPLE_CONF)
+        ripple.setWindowTitle("Ripple Field")
+        ripple.resize(600, 600)
 
-        if ripple_config["use_synthetic"]:
-            # Good for debugging
-            synthetic_excitation = SyntheticPointExcitation(
-                name="Synthetic Ripple",
-                resolution=ripple_config["resolution"],
-                position=(0.5, 0.5),
-                amplitude=10,
-                frequency=400,
-                decay_alpha=0.0,
-                speed=ripple_config["speed"],
-                backend=backend,
+        if FLAGS["use_audio_excitation"]:
+            ripple.add_excitation_source(
+                AudioExcitation(
+                    name="Audio Ripple",
+                    processor=processor,
+                    position=(0.5, 0.5),
+                    max_frequency=ripple.max_frequency,
+                    amplitude=RIPPLE_CONF["amplitude"],
+                    speed=RIPPLE_CONF["speed"],
+                    resolution=RIPPLE_CONF["resolution"],
+                    backend=ripple.backend,
+                )
             )
-            ripple_window.add_excitation_source(synthetic_excitation)
 
-        # Add Heart Video Excitation
-        heart_src = HeartVideoExcitation(
-            source=Path("Data/GeneratedHearts/heart_mri.mp4"),
-            resolution=ripple_config["resolution"],
-            position=(0.3, 0.6),
-            backend=backend,
-            audio_processor=processor   # or None for manual-only
+        if FLAGS["use_heart_video"]:
+            ripple.add_excitation_source(
+                HeartVideoExcitation(
+                    source=HEART_VIDEO_PATH,
+                    resolution=RIPPLE_CONF["resolution"],
+                    position=(0.3, 0.6),
+                    backend=ripple.backend,
+                    # audio_processor=processor,
+                )
+            )
+
+        if FLAGS["use_synthetic"]:
+            ripple.add_excitation_source(
+                SyntheticPointExcitation(
+                    name="Synthetic Ripple",
+                    resolution=RIPPLE_CONF["resolution"],
+                    position=(0.5, 0.5),
+                    amplitude=10,
+                    frequency=400,
+                    speed=RIPPLE_CONF["speed"],
+                    backend=ripple.backend,
+                )
+            )
+
+        ripple.show()
+
+    # Optional helix (Legacy)
+    if FLAGS["show_helix"]:
+        helix = PitchHelixVisualizer(
+            processor,
+            guitar_profile=GuitarProfile(
+                open_strings=[82.41, 110, 146.83, 196, 246.94, 329.63],
+                num_frets=22,
+            ),
         )
-        ripple_window.add_excitation_source(heart_src)
+        helix.resize(800, 600)
+        helix.show()
 
-        ripple_window.setWindowTitle("Ripple Wave Visualizer (Synthetic)")
-        ripple_window.resize(600, 600)
-        ripple_window.show()
-    
-    # Start audio
-    processor_success = processor.start()
-    if not processor_success:
-        logger.error("Failed to start audio processing. Exiting.")
+    # ---------------------------------------------------------------- Start IO
+    if not processor.start():
+        logger.error("Audio start failed.")
         return
-    
+
     signal.signal(signal.SIGINT, signal.SIG_DFL)
     app.aboutToQuit.connect(processor.stop)
-    
+
     try:
         sys.exit(app.exec())
     except KeyboardInterrupt:
-        print("Exiting...")
         processor.stop()
-        app.quit()
 
+
+# -----------------------------------------------------------------------------
 if __name__ == "__main__":
     main()
