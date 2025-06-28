@@ -33,7 +33,8 @@ class SyntheticPointExcitation(ExcitationSourceBase):
         - No propagation mask or boundary behavior implemented.
     """
 
-    def __init__(self, resolution, position, amplitude=1.0, frequency=1.0, decay_alpha=0.0, speed=340.0, backend=np, name: str = "Synthetic Point Excitation"):
+    def __init__(self, resolution, position, amplitude=1.0, frequency=1.0, decay_alpha=0.0, speed=340.0,
+                 backend=np, name: str = "Synthetic Point Excitation"):
         super().__init__(name=name)
 
         self.resolution = resolution

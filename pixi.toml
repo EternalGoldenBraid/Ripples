@@ -20,6 +20,8 @@ pyopengl = ">=3.1.9,<4"
 snakeviz = ">=2.2.2,<3"
 cupy = ">=13.4.1,<14"
 pdoc = ">=14.4.0,<15"
+opencv = ">=4.11.0,<5"
+qdarkstyle = ">=3.2.3,<4"
 
 
 [pypi-dependencies]
