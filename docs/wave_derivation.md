@@ -61,8 +61,7 @@ $$
 
 $$
 \frac{Z^{n+1}_{i,j} - 2Z^n_{i,j} + Z^{n-1}_{i,j}}{\Delta t^2}
-= c^2 \nabla^2 Z^n_{i,j}
-- \gamma \frac{Z^n_{i,j} - Z^{n-1}_{i,j}}{\Delta t}.
+= c^2 \nabla^2 Z^n_{i,j} - \gamma \frac{Z^n_{i,j} - Z^{n-1}_{i,j}}{\Delta t}.
 $$
 
 $$
@@ -71,11 +70,7 @@ $$
 
 $$
 Z^{n+1}_{i,j}
-=
-2Z^n_{i,j}
-- Z^{n-1}_{i,j}
-+ (c \Delta t / \Delta x)^2 \bigl(Z_{i+1,j} + Z_{i-1,j} + Z_{i,j+1} + Z_{i,j-1} - 4Z_{i,j}\bigr)
-- \gamma \Delta t \,(Z^n_{i,j} - Z^{n-1}_{i,j}).
+= 2Z^n_{i,j} - Z^{n-1}_{i,j} (c \Delta t / \Delta x)^2 \bigl(Z_{i+1,j} + Z_{i-1,j} + Z_{i,j+1} + Z_{i,j-1} - 4Z_{i,j}\bigr) \gamma \Delta t \,(Z^n_{i,j} - Z^{n-1}_{i,j}).
 $$
 
 ---
@@ -83,11 +78,7 @@ $$
 ## Code expression (final form)
 
 $$
-Z_{\text{new}}
-=
-\underbrace{2 Z - Z_{\text{old}}}_{\text{leap-frog}}
-+ \underbrace{c2\_dt2 \cdot \text{laplacian}(Z)}_{\text{curvature}}
-- \underbrace{(1 - \text{damping}) \cdot \Delta t \cdot (Z - Z_{\text{old}})}_{\text{damping correction}}.
+Z_{\text{new}} = \underbrace{2 Z - Z_{\text{old}}}_{\text{leap-frog}} \underbrace{c2\_dt2 \cdot \text{laplacian}(Z)}_{\text{curvature}} \underbrace{(1 - \text{damping}) \cdot \Delta t \cdot (Z - Z_{\text{old}})}_{\text{damping correction}}.
 $$
 
 Where
