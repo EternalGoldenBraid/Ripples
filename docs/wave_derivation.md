@@ -14,8 +14,7 @@ $$
 ### Second time derivative
 
 $$
-\frac{\partial^2 Z}{\partial t^2}
-\approx \frac{Z^{n+1}_{i,j} - 2Z^n_{i,j} + Z^{n-1}_{i,j}}{\Delta t^2}.
+\frac{\partial^2 Z}{\partial t^2} \approx \frac{Z^{n+1}_{i,j} - 2Z^n_{i,j} + Z^{n-1}_{i,j}}{\Delta t^2}.
 $$
 
 ### First time derivative (damping)
