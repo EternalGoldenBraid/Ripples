@@ -4,8 +4,7 @@
 
 $$
 \frac{\partial^2 Z}{\partial t^2}
-= c^2 \nabla^2 Z
-- \gamma \frac{\partial Z}{\partial t}.
+= c^2 \nabla^2 Z - \gamma \frac{\partial Z}{\partial t}.
 $$
 
 ---
@@ -16,8 +15,7 @@ $$
 
 $$
 \frac{\partial^2 Z}{\partial t^2}
-\approx
-\frac{Z^{n+1}_{i,j} - 2Z^n_{i,j} + Z^{n-1}_{i,j}}{\Delta t^2}.
+\approx \frac{Z^{n+1}_{i,j} - 2Z^n_{i,j} + Z^{n-1}_{i,j}}{\Delta t^2}.
 $$
 
 ### First time derivative (damping)
