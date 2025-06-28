@@ -13,6 +13,7 @@ from loguru import logger as log
 from audioviz.visualization.visualizer_base import VisualizerBase
 from audioviz.audio_processing.audio_processor import AudioProcessor
 from audioviz.sources.base import ExcitationSourceBase
+from audioviz.physics.wave_propagator import WavePropagatorCPU, WavePropagatorGPU
 
 class RippleWaveVisualizer(VisualizerBase):
     """
@@ -169,11 +170,63 @@ class RippleWaveVisualizer(VisualizerBase):
         layout.addWidget(speed_slider)
 
 
-    def add_source_controls(self, source: ExcitationSourceBase):
+    def add_source_controls(self, source: ExcitationSourceBase) -> None:
+        """Create a QGroupBox with all UI controls declared by a source."""
+
+        group = QtWidgets.QGroupBox(source.name)
+        group_layout = QtWidgets.QVBoxLayout(group)
+
+        for key, cfg in source.get_controls():
+            ctrl_type = cfg.get("type", "slider")      # default → slider
+            tooltip   = cfg.get("tooltip", "")
+
+            if ctrl_type == "checkbox":
+                widget = QtWidgets.QCheckBox(cfg["label"])
+                widget.setChecked(bool(cfg["init"]))
+                widget.setToolTip(tooltip)
+                widget.stateChanged.connect(cfg["on_change"])
+                group_layout.addWidget(widget)
+
+            elif ctrl_type == "slider":                # legacy + default
+                label = QLabel(cfg["label"])
+                label.setToolTip(tooltip)
+
+                slider = QSlider(Qt.Horizontal)
+                slider.setMinimum(cfg["min"])
+                slider.setMaximum(cfg["max"])
+                slider.setValue(cfg["init"])
+                slider.valueChanged.connect(cfg["on_change"])
+
+                val_lbl = QLabel(str(cfg["init"]))
+
+                def _update(lbl=val_lbl, pname=key):
+                    def inner(v):
+                        fmt = "{:.2f}" if ("amplitude" in pname or "alpha" in pname) else "{}"
+                        lbl.setText(fmt.format(v / 100 if ("amplitude" in pname or "alpha" in pname) else v))
+                    return inner
+                slider.valueChanged.connect(_update())
+
+                group_layout.addWidget(label)
+                group_layout.addWidget(val_lbl)
+                group_layout.addWidget(slider)
+
+            else:
+                raise ValueError(
+                    f"Unknown control type '{ctrl_type}' for source '{source.name}'.\n"
+                    "Supported types: 'slider', 'checkbox'."
+                )
+
+        group.setLayout(group_layout)
+        self.control_layout.addWidget(group)
+
+
+    def add_source_controls_old(self, source: ExcitationSourceBase):
         group = QtWidgets.QGroupBox(source.name)
         group_layout = QtWidgets.QVBoxLayout(group)
     
         for param_name, config in source.get_controls():
+            ctrl_type = config.get("type", "slider")
+
             slider = QSlider(Qt.Horizontal)
             slider.setMinimum(config["min"])
             slider.setMaximum(config["max"])
@@ -230,82 +283,6 @@ class RippleWaveVisualizer(VisualizerBase):
         self.image_item.setImage(Z_vis, autoLevels=False)
         self.excitation[:] = 0  # Reset excitation for next step
 
-class WavePropagatorCPU:
-    def __init__(self, shape, dx, dt, speed, damping):
-        self.shape = shape
-        self.dx = dx
-        self.dt = dt
-        self.c = speed
-        self.damping = damping
-
-        self.Z = np.zeros(shape, dtype=np.float32)
-        self.Z_old = np.zeros_like(self.Z)
-        self.Z_new = np.zeros_like(self.Z)
-
-        self.c2_dt2 = (self.c * self.dt / self.dx)**2
-
-    def add_excitation(self, excitation: np.ndarray):
-        assert excitation.shape == self.Z.shape
-        self.Z += excitation
-
-    def step(self):
-        Z = self.Z
-        laplacian = (
-            -4 * Z +
-            np.roll(Z, 1, axis=0) + np.roll(Z, -1, axis=0) +
-            np.roll(Z, 1, axis=1) + np.roll(Z, -1, axis=1)
-        )
-        self.Z_new = (2 * Z - self.Z_old + self.c2_dt2 * laplacian)
-        self.Z_new *= self.damping
-        self.Z_old = Z.copy()
-        self.Z = self.Z_new.copy()
-
-    def get_state(self):
-        return self.Z
-
-    def reset(self):
-        self.Z[:] = 0
-        self.Z_old[:] = 0
-        self.Z_new[:] = 0
-
-
-class WavePropagatorGPU:
-    def __init__(self, shape, dx: float, dt: float, speed: float, damping: float):
-        self.shape = shape
-        self.dx: float = dx
-        self.dt: float = dt
-        self.c: float = speed
-        self.damping: float = damping
-
-        self.Z = cp.zeros(shape, dtype=cp.float32)
-        self.Z_old = cp.zeros_like(self.Z)
-        self.Z_new = cp.zeros_like(self.Z)
-
-        self.c2_dt2: float = (self.c * self.dt / self.dx)**2
-
-    def add_excitation(self, excitation: cp.ndarray):
-        assert excitation.shape == self.Z.shape
-        self.Z += excitation
-
-    def step(self):
-        Z = self.Z
-        laplacian = (
-            -4 * Z +
-            cp.roll(Z, 1, axis=0) + cp.roll(Z, -1, axis=0) +
-            cp.roll(Z, 1, axis=1) + cp.roll(Z, -1, axis=1)
-        )
-        self.Z_new = (2 * Z - self.Z_old + self.c2_dt2 * laplacian)
-        self.Z_new *= self.damping
-        self.Z_old = Z.copy()
-        self.Z = self.Z_new.copy()
-
-    def get_state(self):
-        return self.Z
-
-    def reset(self):
-        self.Z[:] = 0
-        self.Z_old[:] = 0
-        self.Z_new[:] = 0
 
 
 if __name__ == "__main__":

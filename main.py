@@ -4,6 +4,8 @@ from pathlib import Path
 from typing import Union, Optional, Dict
 
 from PyQt5 import QtWidgets, QtCore
+import qdarkstyle
+
 import numpy as np
 import cupy as cp
 import librosa as lr
@@ -19,6 +21,7 @@ from audioviz.utils.audio_devices import select_devices
 from audioviz.utils.audio_devices import AudioDeviceDesktop 
 from audioviz.utils.guitar_profiles import GuitarProfile  
 from audioviz.sources.audio import AudioExcitation
+from audioviz.sources.heart_video import HeartVideoExcitation
 from audioviz.sources.synthetic import (
     SyntheticPointExcitation,
 )
@@ -101,6 +104,7 @@ def main():
     # --- Run Phase ---
     
     app = QtWidgets.QApplication([])
+    app.setStyleSheet(qdarkstyle.load_stylesheet_pyqt5())
     
     # Audio processor
     processor = AudioProcessor(
@@ -177,9 +181,10 @@ def main():
         "speed": 340.0,  # m/s
         # "speed": 34.0,  # m/s
         "damping": 0.90,  # damping factor
-        # "damping": 0.1,  # damping factor
+        # "damping": 0.1,  # damping facto
         "use_gpu": True,
     }
+    backend = cp if ripple_config["use_gpu"] else np
     
     if show_ripples:
 
@@ -198,9 +203,9 @@ def main():
             speed=ripple_config["speed"],
             resolution=ripple_config["resolution"],
             decay_alpha=0.0,  # No decay
-            backend=cp if ripple_config["use_gpu"] else np,
+            backend=backend,
         )
-        ripple_window.add_excitation_source(audio_excitation)
+        # ripple_window.add_excitation_source(audio_excitation)
 
         if ripple_config["use_synthetic"]:
             # Good for debugging
@@ -212,9 +217,19 @@ def main():
                 frequency=400,
                 decay_alpha=0.0,
                 speed=ripple_config["speed"],
-                backend=cp if ripple_config["use_gpu"] else np,
+                backend=backend,
             )
             ripple_window.add_excitation_source(synthetic_excitation)
+
+        # Add Heart Video Excitation
+        heart_src = HeartVideoExcitation(
+            source=Path("Data/GeneratedHearts/heart_mri.mp4"),
+            resolution=ripple_config["resolution"],
+            position=(0.3, 0.6),
+            backend=backend,
+            audio_processor=processor   # or None for manual-only
+        )
+        ripple_window.add_excitation_source(heart_src)
 
         ripple_window.setWindowTitle("Ripple Wave Visualizer (Synthetic)")
         ripple_window.resize(600, 600)
