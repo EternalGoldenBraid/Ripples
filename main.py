@@ -17,7 +17,7 @@ from typing import Dict, Union
 import signal
 import sys
 
-# Third-party
+
 import numpy as np
 import librosa as lr
 import qdarkstyle
@@ -26,7 +26,7 @@ from matplotlib import cm
 from matplotlib.colors import Normalize
 from loguru import logger
 
-# Local modules
+
 from audioviz.audio_processing.audio_processor import AudioProcessor
 from audioviz.utils.audio_devices import select_devices, AudioDeviceDesktop
 from audioviz.utils.guitar_profiles import GuitarProfile
@@ -34,7 +34,10 @@ from audioviz.visualization.spectrogram_visualizer import SpectrogramVisualizer
 from audioviz.visualization.ripple_wave_visualizer import RippleWaveVisualizer
 from audioviz.visualization.pitch_helix_visualizer import PitchHelixVisualizer
 
+from audioviz.sources.pose.mediapipe_pose_source import MediaPipePoseExtractor
+from audioviz.sources.pose.pose_graph_state import PoseGraphState
 from audioviz.sources.audio import AudioExcitation
+from audioviz.sources.camera import CameraSource
 from audioviz.sources.heart_video import HeartVideoExcitation
 from audioviz.sources.synthetic import SyntheticPointExcitation
 
@@ -46,18 +49,20 @@ FLAGS = dict(
     show_spectrogram=False,
     show_ripples=True,
     show_helix=False,
+    use_pose_graph=True,
+    # use_pose_graph=False,
 
     # use_audio_excitation=True,
     # use_heart_video=False,
     # use_synthetic=False,
 
-    use_audio_excitation=False,
-    use_heart_video=True,
-    use_synthetic=False,
-
     # use_audio_excitation=False,
-    # use_heart_video=False,
-    # use_synthetic=True,
+    # use_heart_video=True,
+    # use_synthetic=False,
+
+    use_audio_excitation=False,
+    use_heart_video=False,
+    use_synthetic=True,
 )
 
 HEART_VIDEO_PATH = Path("Data/GeneratedHearts/heart_mri.mp4")
@@ -164,9 +169,20 @@ def main() -> None:
 
     # Ripple window & sources
     if FLAGS["show_ripples"]:
+
+
         ripple = RippleWaveVisualizer(**RIPPLE_CONF)
         ripple.setWindowTitle("Ripple Field")
         ripple.resize(600, 600)
+
+        if FLAGS["use_pose_graph"]:
+            camera: CameraSource = CameraSource(camera_index=0, width=640, height=480)
+            camera.start()
+
+            extractor: MediaPipePoseExtractor = MediaPipePoseExtractor()
+            pose_state: PoseGraphState = PoseGraphState(num_nodes=33, adjacency=extractor._get_static_adjacency(33))
+
+            ripple.add_pose_graph(camera=camera, extractor=extractor, pose_graph_state=pose_state)
 
         if FLAGS["use_audio_excitation"]:
             ripple.add_excitation_source(
@@ -207,6 +223,7 @@ def main() -> None:
                     backend=ripple.backend,
                 )
             )
+
 
         ripple.show()
 

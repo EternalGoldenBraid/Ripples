@@ -1,7 +1,10 @@
-from typing import Optional, Tuple, Dict, Any
+from typing import Optional, Tuple, Dict, Any, Union
 
 import numpy as np
 import cupy as cp
+import cupyx
+from scipy.sparse import coo_matrix
+
 import matplotlib.cm as cm
 from PyQt5 import QtWidgets
 import pyqtgraph as pg
@@ -9,11 +12,13 @@ from PyQt5.QtWidgets import QSlider, QLabel
 from PyQt5.QtCore import Qt
 from loguru import logger as log
 
-
+from audioviz.sources.camera import CameraSource
+from audioviz.sources.pose.mediapipe_pose_source import MediaPipePoseExtractor
+from audioviz.sources.pose.pose_graph_state import PoseGraphState
 from audioviz.visualization.visualizer_base import VisualizerBase
-from audioviz.audio_processing.audio_processor import AudioProcessor
+from audioviz.physics.wave_propagator import WavePropagatorGPU
 from audioviz.sources.base import ExcitationSourceBase
-from audioviz.physics.wave_propagator import WavePropagatorCPU, WavePropagatorGPU
+from audioviz.utils.graph_utils import build_grid_adjacency, build_combined_laplacian
 
 class RippleWaveVisualizer(VisualizerBase):
     """
@@ -24,7 +29,6 @@ class RippleWaveVisualizer(VisualizerBase):
         resolution (Tuple[int, int]): Pixel resolution of the field (H, W).
         speed (float): Wave propagation speed (m/s).
         damping (float): Wave energy loss factor per frame.
-        use_synthetic (bool): Whether to inject synthetic excitation (deprecated).
         use_gpu (bool): Use CuPy for GPU acceleration.
 
     Attributes:
@@ -51,31 +55,28 @@ class RippleWaveVisualizer(VisualizerBase):
         - Source coordinates are still in pixel space.
         - UI assumes single main plot; no support for 3D or overlays.
     """
+
     def __init__(self,
                  plane_size_m: Tuple[float, float],
                  dx: float,
                  speed: float,
                  damping: float,
-
-                 use_synthetic: bool = True,
-
-                 use_gpu: bool = False,
+                 use_gpu: bool = True,
                  ):
-
         super().__init__()
 
-        self.display_max: float = 1.0
-        self.min_display_max: float = 500
-        self.display_level_update_interval: int = 10
-        self.display_level_counter: int = 0
-
-        self.overlay_image: Optional[np.ndarray] = None
-        self.overlay_mask: Optional[np.ndarray] = None
+        self.pose_graph_state: Optional[PoseGraphState] = None
+        self.camera: Optional[CameraSource] = None
+        self.extractor: Optional[MediaPipePoseExtractor] = None
 
         self.excitation_sources: Dict[str, ExcitationSourceBase] = {}
         self.use_gpu = use_gpu
         self.xp = cp if use_gpu else np
         self.backend = self.xp
+
+
+        self.overlay_image: Optional[Union[np.ndarray, cp.ndarray]] = None
+        self.overlay_mask: Optional[Union[np.ndarray, cp.ndarray]] = None
 
         self.plane_size_m = plane_size_m
         self.dx = dx
@@ -83,19 +84,15 @@ class RippleWaveVisualizer(VisualizerBase):
         Nx = int(plane_size_m[0] / dx)
         Ny = int(plane_size_m[1] / dx)
         self.resolution = (Ny, Nx)
-        # self.resolution = resolution
-        # self.dx = self.plane_size_m[0] / self.resolution[0]
-        # self.dy = self.plane_size_m[1] / self.resolution[1]
 
         self.excitation = self.xp.zeros(self.resolution, dtype=np.float32)
         self.speed = speed
-        self.time = 0.0
-
-        self.safe_factor = 0.95  # Safety factor to avoid CFL condition issues
+        self.safe_factor = 0.95
         self.dt = (max(self.dx, self.dy) / speed) * 1 / np.sqrt(2) * self.safe_factor
         self.max_frequency = self.speed / (2 * max(self.dx, self.dy))
+        self.time = 0.0
 
-        propagator_kwargs = {
+        self.propagator_kwargs = {
             "shape": self.resolution,
             "dx": self.dx,
             "dt": self.dt,
@@ -103,35 +100,13 @@ class RippleWaveVisualizer(VisualizerBase):
             "damping": damping
         }
 
-        log.info(
-            f"""
-            Initializing RippleWaveVisualizer with:
-                resolution {self.resolution}, dx={self.dx:.4f} m, dy={self.dy:.4f} m,
-                dt={self.dt:.6f} s, max frequency {self.max_frequency:.2f} Hz, speed {self.speed:.1f} m/s,
-                plane size {self.plane_size_m[0]}m x {self.plane_size_m[1]}m,
-            """)
+        self.use_matrix = False
+        self.propagator = WavePropagatorGPU(**self.propagator_kwargs)
 
-        if use_gpu:
-            self.propagator = WavePropagatorGPU(**propagator_kwargs)
-        else:
-            self.propagator = WavePropagatorCPU(**propagator_kwargs)
 
         self.Z = self.xp.zeros(self.resolution, dtype=self.xp.float32)
-
-
-        # Grid for ripple
-        self.source_positions = []
-        np.random.seed(42)
-        x = np.random.randint(0, self.resolution[0])
-        y = np.random.randint(0, self.resolution[1])
-        self.source_position: Tuple[int, int] = (x, y)
-
-        self.xs, self.ys = self.xp.meshgrid(
-            self.xp.arange(self.resolution[1]),
-            self.xp.arange(self.resolution[0])
-        )
-
         self._init_ui()
+
 
     def _init_ui(self):
 
@@ -217,6 +192,42 @@ class RippleWaveVisualizer(VisualizerBase):
         layout.addWidget(QLabel("Wave Speed (m/s)"))
         layout.addWidget(self.speed_label)
         layout.addWidget(speed_slider)
+
+    def add_pose_graph(self, camera: CameraSource, extractor: MediaPipePoseExtractor,
+                       pose_graph_state: PoseGraphState) -> None:
+
+        self.use_matrix = True
+        self.camera = camera
+        self.extractor = extractor
+        self.pose_graph_state = pose_graph_state
+        self.N_grid = self.resolution[0] * self.resolution[1]
+
+        # Build grid adjacency
+        grid_adj = build_grid_adjacency(self.resolution)
+
+        # Pose adjacency
+        pose_adj = pose_graph_state.get_adjacency_coo()
+
+        # For now, no coupling
+        coupling_shape = (grid_adj.shape[0], pose_adj.shape[0])
+        coupling = coo_matrix(([], ([], [])), shape=coupling_shape)
+
+        L_coo = build_combined_laplacian(grid_adj, pose_adj, coupling)
+        L_csr = L_coo.tocsr()
+        L_csr_gpu = cupyx.scipy.sparse.csr_matrix(L_csr)
+
+        self.extended_excitation: cp.ndarray = self.xp.zeros(
+            (self.N_grid + pose_graph_state.num_nodes,),
+            dtype=self.xp.float32
+        )
+
+        self.propagator_kwargs["use_matrix"] = True
+        self.propagator_kwargs["laplacian_csr"] = L_csr_gpu
+        self.propagator_kwargs["shape"] = (self.resolution[0] * self.resolution[1] + pose_graph_state.num_nodes,)
+
+        self.propagator = WavePropagatorGPU(**self.propagator_kwargs)
+        self.camera = camera
+        self.extractor = extractor
 
 
     def add_source_controls(self, source: ExcitationSourceBase) -> None:
@@ -353,7 +364,7 @@ class RippleWaveVisualizer(VisualizerBase):
         self._recompute_display_range()
         source.subscribe("gain_changed", lambda g: self._recompute_display_range())
 
-    def update_visualization(self):
+    def update_visualization_old(self):
         self.time += self.dt
         weight = 1 / len(self.excitation_sources)
     
@@ -393,8 +404,74 @@ class RippleWaveVisualizer(VisualizerBase):
             self.log_counter_ = 0
     
         self.excitation[:] = 0  # Reset excitation
-        self.overlay_image = None
-        self.overlay_mask = None
+
+    def update_visualization(self):
+        self.time += self.dt
+        weight = 1 / max(len(self.excitation_sources), 1)
+    
+        for name, source in self.excitation_sources.items():
+            result: Dict[str, Any] = source(self.time)
+            self.excitation[:] += weight * result["excitation"]
+
+            overlay_dict = result.get("overlay")
+            if overlay_dict:
+                self.overlay_image = result["excitation"]
+                self.overlay_mask = cp.asnumpy(overlay_dict["mask"]) if self.use_gpu else overlay_dict["mask"]
+
+        # Update pose graph state if present
+        if self.pose_graph_state is not None and self.camera and self.extractor:
+            frame = self.camera.read()
+            if frame is not None:
+                pose_data = self.extractor.extract(frame)
+                coords = pose_data["coords"]
+                if coords.shape[0] > 0:
+                    self.pose_graph_state.update(coords, self.dt)
+
+            # Diffuse also to the pose graph nodes.
+             # Prepare extended excitation vector
+            flat_grid = self.excitation.ravel()
+            self.extended_excitation[:self.N_grid] = flat_grid
+            self.propagator.add_excitation(self.extended_excitation)
+
+            assert (self.extended_excitation[self.N_grid:] == 0).all(), \
+                    "Extended excitation should be zero for pose graph nodes."
+        else:
+            self.propagator.add_excitation(self.excitation)
+        self.propagator.step()
+
+        if self.pose_graph_state is not None:
+            combined_state = self.propagator.get_state().flatten()
+            grid_state_flat = combined_state[:self.N_grid]
+            pose_state_flat = combined_state[self.N_grid:]
+
+            self.Z[:] = grid_state_flat.reshape(self.resolution)
+            self.pose_graph_state.set_ripple_states(cp.asnumpy(pose_state_flat))
+        else:
+            self.Z[:] = self.propagator.get_state()
+
+        Z_vis = cp.asnumpy(self.Z) if self.use_gpu else self.Z
+
+        if self.overlay_image is not None and self.overlay_mask is not None:
+            alpha = 0.0
+            Z_vis[self.overlay_mask] = (
+                alpha * (cp.asnumpy(self.overlay_image[self.overlay_mask]) if self.use_gpu else self.overlay_image[self.overlay_mask])
+                + (1 - alpha) * Z_vis[self.overlay_mask]
+            )
+
+        self.image_item.setImage(Z_vis, autoLevels=False)
+
+        cfl = (self.speed * self.dt) / self.dx
+        if cfl > 1 / np.sqrt(2):
+            log.warning(f"⚠️ CFL condition violated: {cfl:.2f} > {1/np.sqrt(2):.2f}. Simulation may be unstable!")
+
+        if not hasattr(self, 'log_counter_'):
+            self.log_counter_ = 0
+        self.log_counter_ += 1
+        if self.log_counter_ == 30:
+            log.debug(f"min: {Z_vis.min()}, max: {Z_vis.max()}, mean: {Z_vis.mean()}")
+            self.log_counter_ = 0
+
+        self.excitation[:] = 0
 
 
 
