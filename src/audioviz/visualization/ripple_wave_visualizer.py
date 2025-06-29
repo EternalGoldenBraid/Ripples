@@ -65,6 +65,7 @@ class RippleWaveVisualizer(VisualizerBase):
                  ):
         super().__init__()
 
+        self.log_counter_: int = 0
         self.pose_graph_state: Optional[PoseGraphState] = None
         self.camera: Optional[CameraSource] = None
         self.extractor: Optional[MediaPipePoseExtractor] = None
@@ -456,14 +457,19 @@ class RippleWaveVisualizer(VisualizerBase):
             """
             TODO: Extend to coupled laplacian
             """
-            # Get pose node excitation vector
-            pose_ex_vec = self.pose_graph_state()
-            
-            # Choose node indices to excite, e.g., hands and apply scaled velocity norms
-            for i in self.coupled_pose_indices:
-                self.extended_excitation[self.N_grid + i] = cp.clip(pose_ex_vec[i], 0, 1)
+            if self.log_counter_ % 30000000 == 0:
+                # Get pose node excitation vector
+                pose_ex_vec = self.pose_graph_state()
+                
+                # Choose node indices to excite, e.g., hands and apply scaled velocity norms
+                for i in self.coupled_pose_indices:
+                    val = np.clip(pose_ex_vec[i] / 50000, 0, 0.02)
+                    # self.extended_excitation[self.N_grid + i] = cp.clip(pose_ex_vec[i]/10000, 0, 1)
+                    self.extended_excitation[self.N_grid + i] = val
+                    log.debug(f"Extended excitation for pose node {i}: {val:.4f}")
 
             self.propagator.add_excitation(self.extended_excitation)
+            self.extended_excitation[:self.N_grid] = 0
 
             # assert (self.extended_excitation[self.N_grid:] == 0).all(), \
             #         "Extended excitation should be zero for pose graph nodes."
@@ -496,8 +502,6 @@ class RippleWaveVisualizer(VisualizerBase):
         if cfl > 1 / np.sqrt(2):
             log.warning(f"⚠️ CFL condition violated: {cfl:.2f} > {1/np.sqrt(2):.2f}. Simulation may be unstable!")
 
-        if not hasattr(self, 'log_counter_'):
-            self.log_counter_ = 0
         self.log_counter_ += 1
         if self.log_counter_ == 30:
             log.debug(f"min: {Z_vis.min()}, max: {Z_vis.max()}, mean: {Z_vis.mean()}")
