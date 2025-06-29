@@ -137,8 +137,8 @@ class WavePropagatorGPU:
             cp.roll(Z, 1, axis=1) + cp.roll(Z, -1, axis=1)
         )
         # self.Z_new = (2 * Z - self.Z_old + self.c2_dt2 * laplacian) # No damping
-        # self.Z_new = (2 * Z - self.Z_old + self.c2_dt2 * laplacian - (1-self.damping)*self.dt*(Z - self.Z_old)) # True damping
-        self.Z_new = (2 * Z - self.Z_old + self.c2_dt2 * laplacian)*self.damping
+        self.Z_new = (2 * Z - self.Z_old + self.c2_dt2 * laplacian - (self.damping)*self.dt*(Z - self.Z_old)) # True damping
+        # self.Z_new = (2 * Z - self.Z_old + self.c2_dt2 * laplacian)*self.damping
         self.Z_old = Z.copy()
         self.Z = self.Z_new.copy()
 

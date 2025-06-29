@@ -1,4 +1,4 @@
-from typing import List, Tuple, Union
+from typing import List, Tuple, Union, Optional, Dict
 
 import numpy as np
 import cupy as cp
@@ -16,9 +16,10 @@ class AudioExcitation(ExcitationSourceBase):
         processor (AudioProcessor): Source of spectral audio data.
         position (Tuple[float, float]): Normalized (0-1) position of the emitter in the plane.
         max_frequency (float): Clipping frequency to avoid aliasing.
-        amplitude (float): Default amplitude for fallback (may be overridden by energy weights).
+        gain (float): Gain factor for the excitation amplitude.
         speed (float): Propagation speed in m/s.
         resolution (Tuple[int, int]): Resolution of the field in (H, W).
+        dx (float): Pixel size in meters.
         decay_alpha (float): Controls spatial falloff.
         backend (np or cp): Backend array module.
         name (str): Display name.
@@ -29,17 +30,16 @@ class AudioExcitation(ExcitationSourceBase):
 
     TODO:
         - Support for directional excitation from stereo/multichannel input.
-        - Unify amplitude source: drop static amplitude in favor of energy-weighted top-K.
         - Normalize coordinates to world units (meters).
 
     Caveats:
         - Operates in pixel space.
-        - Only energy-weighted top-K frequency amplitudes are supported for now.
     """
 
     def __init__(self, processor: AudioProcessor, 
+                 nominal_peak: Optional[float],
                  position: Tuple[float, float],
-                 max_frequency: float, amplitude: float,
+                 max_frequency: float, gain: float, dx: float,
                  speed:float, resolution: Tuple[int, int],
                  backend: Union[np.ndarray, cp.ndarray],
                  decay_alpha: float = 0.0,
@@ -50,6 +50,9 @@ class AudioExcitation(ExcitationSourceBase):
         TODO:
             - Amplitude: It's updated in the QTSlider owned by WaveVisualizer but defined here?
         """
+
+        super().__init__(nominal_peak=nominal_peak, name=name)
+
         self.processor = processor
         self.audio_processor_chl_idxs = audio_processor_chl_idxs
         self.xp = backend
@@ -66,7 +69,7 @@ class AudioExcitation(ExcitationSourceBase):
         )
 
         self.position = position
-        self.amplitude = amplitude
+        self.gain = gain 
         self.speed = speed
         self.resolution = resolution
         self.decay_alpha = decay_alpha
@@ -82,7 +85,8 @@ class AudioExcitation(ExcitationSourceBase):
 
         self.name: str = name
 
-    def __call__(self, t: float, chl_idx: int = 0) -> Union[np.ndarray, cp.ndarray]:
+    def __call__(self, t: float, chl_idx: int = 0
+                 ) -> Dict[str, Union[np.ndarray, cp.ndarray]]:
         """
         Note:
             I think chl_idx == 0 is the microphone with scarlet studio.
@@ -110,7 +114,7 @@ class AudioExcitation(ExcitationSourceBase):
         excitation = self.xp.zeros(self.resolution, dtype=self.xp.float32)
 
         if len(freqs) == 0:
-            return excitation
+            return {'excitation': excitation}
 
         N, k = freqs.shape
 
@@ -130,7 +134,7 @@ class AudioExcitation(ExcitationSourceBase):
         phases = 2 * self.xp.pi * freqs * t
 
         # for computing:
-        #   ripple[n, k, h, w] = amplitude * decay[n, 1, h, w] * sin(phase[n, k, 1, 1] - 2π * r[n, 1, h, w] / wavelength[n, k, 1, 1])
+        # ripple[n, k, h, w] = amps[N, k, 1, 1] * decay[n, 1, h, w] * sin(phase[n, k, 1, 1] - 2π * r[n, 1, h, w] / wavelength[n, k, 1, 1])
         r = r_meters[:, None, :, :] # shape: (N, 1, H, W)
         decay = decay[:, None, :, :] # shape: (N, 1, H, W)
         wavelengths = wavelengths[:, :, None, None] # shape: (N, k, 1, 1)
@@ -140,33 +144,36 @@ class AudioExcitation(ExcitationSourceBase):
         propagation_limit = self.speed * t
         mask = r <= propagation_limit
 
-        # ripple = self.amplitude * decay * self.xp.sin(phases - 2 * self.xp.pi * r / wavelengths)
-        ripple =  decay * amps * self.xp.sin(phases - 2 * self.xp.pi * r / wavelengths)
-        # ripple *= mask
+        ripple =  self.gain * decay * amps * self.xp.sin(phases - 2 * self.xp.pi * r / wavelengths)
+        ripple *= mask
 
-        return ripple.sum(axis=(0, 1))
+        if not hasattr(self, 'log_counter_'):
+            self.log_counter_ = 0
+        self.log_counter_ += 1
+        if self.log_counter_  == 10:
+            log.debug(f"min: {ripple.min()}, max: {ripple.max()}, mean: {ripple.mean()}")
+            self.log_counter_ = 0
 
-    def set_amplitude(self, value: float):
-            self.amplitude = value
+        return {'excitation': ripple.sum(axis=(0, 1))}
 
-    def set_decay_alpha(self, value: float):
+    def _set_decay_alpha(self, value: float):
         self.decay_alpha = value
 
-    def set_position_x(self, x: int):
+    def _set_position_x(self, x: int):
         self.position = (x, self.position[1])
 
-    def set_position_y(self, y: int):
+    def _set_position_y(self, y: int):
         self.position = (self.position[0], y)
 
     def get_controls(self):
         return [
-            ("amplitude", {
-                "label": "Amplitude",
+            ("gain", {
+                "label": "Gain",
                 "min": 0,
-                "max": 500,
-                "init": int(self.amplitude * 100),
+                "max": 1000,
+                "init": int(self.gain* 100),
                 "tooltip": "Strength of audio excitation",
-                "on_change": lambda val: self.set_amplitude(val / 100.0)
+                "on_change": lambda val: self._set_gain(val / 100.0)
             }),
             ("decay_alpha", {
                 "label": "Decay α",
@@ -174,7 +181,7 @@ class AudioExcitation(ExcitationSourceBase):
                 "max": 200,  # Maps to 0–20
                 "init": int(self.decay_alpha * 10),
                 "tooltip": "How fast the ripple decays from the source",
-                "on_change": lambda val: self.set_decay_alpha(val / 10.0)
+                "on_change": lambda val: self._set_decay_alpha(val / 10.0)
             }),
             ("position_x", {
                 "label": "Source X",
@@ -182,7 +189,7 @@ class AudioExcitation(ExcitationSourceBase):
                 "max": self.resolution[1] - 1,
                 "init": self.position[0],
                 "tooltip": "X coordinate of the source",
-                "on_change": self.set_position_x
+                "on_change": self._set_position_x
             }),
             ("position_y", {
                 "label": "Source Y",
@@ -190,6 +197,6 @@ class AudioExcitation(ExcitationSourceBase):
                 "max": self.resolution[0] - 1,
                 "init": self.position[1],
                 "tooltip": "Y coordinate of the source",
-                "on_change": self.set_position_y
+                "on_change": self._set_position_y
             })
         ]

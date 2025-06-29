@@ -43,13 +43,21 @@ from audioviz.sources.synthetic import SyntheticPointExcitation
 # -----------------------------------------------------------------------------
 RUN_MODE = "live"        # "live" | "wav" | "headless"
 FLAGS = dict(
-    show_spectrogram=True,
+    show_spectrogram=False,
     show_ripples=True,
     show_helix=False,
+
+    # use_audio_excitation=True,
+    # use_heart_video=False,
+    # use_synthetic=False,
 
     use_audio_excitation=False,
     use_heart_video=True,
     use_synthetic=False,
+
+    # use_audio_excitation=False,
+    # use_heart_video=False,
+    # use_synthetic=True,
 )
 
 HEART_VIDEO_PATH = Path("Data/GeneratedHearts/heart_mri.mp4")
@@ -65,10 +73,10 @@ WINDOW_MS  = 20
 HOP_RATIO  = 1 / 4
 
 RIPPLE_CONF = dict(
-    plane_size_m=(0.30, 0.30),        # physical plane if needed
-    resolution=(1440, 2560),          # (H, W)
-    speed=340.0,
-    amplitude=10.0,
+    # plane_size_m=(0.30, 0.30),        # physical plane if needed
+    plane_size_m=(10., 10.),        # physical plane if needed
+    dx=5e-3,                     # pixel size in meters
+    speed=10.0,
     damping=0.90,
     use_gpu=True,
 )
@@ -164,12 +172,14 @@ def main() -> None:
             ripple.add_excitation_source(
                 AudioExcitation(
                     name="Audio Ripple",
+                    nominal_peak=1.0,
                     processor=processor,
                     position=(0.5, 0.5),
                     max_frequency=ripple.max_frequency,
-                    amplitude=RIPPLE_CONF["amplitude"],
+                    gain=0.0,
                     speed=RIPPLE_CONF["speed"],
-                    resolution=RIPPLE_CONF["resolution"],
+                    dx=RIPPLE_CONF["dx"],
+                    resolution=ripple.resolution,
                     backend=ripple.backend,
                 )
             )
@@ -178,7 +188,7 @@ def main() -> None:
             ripple.add_excitation_source(
                 HeartVideoExcitation(
                     source=HEART_VIDEO_PATH,
-                    resolution=RIPPLE_CONF["resolution"],
+                    resolution=ripple.resolution,
                     position=(0.3, 0.6),
                     backend=ripple.backend,
                     # audio_processor=processor,
@@ -189,9 +199,9 @@ def main() -> None:
             ripple.add_excitation_source(
                 SyntheticPointExcitation(
                     name="Synthetic Ripple",
-                    resolution=RIPPLE_CONF["resolution"],
+                    dx=RIPPLE_CONF["dx"],
+                    resolution=ripple.resolution,
                     position=(0.5, 0.5),
-                    amplitude=10,
                     frequency=400,
                     speed=RIPPLE_CONF["speed"],
                     backend=ripple.backend,
