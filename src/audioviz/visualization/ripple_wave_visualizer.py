@@ -195,6 +195,69 @@ class RippleWaveVisualizer(VisualizerBase):
 
     def add_pose_graph(self, camera: CameraSource, extractor: MediaPipePoseExtractor,
                        pose_graph_state: PoseGraphState) -> None:
+    
+        self.use_matrix = True
+        self.camera = camera
+        self.extractor = extractor
+        self.pose_graph_state = pose_graph_state
+        self.N_grid = self.resolution[0] * self.resolution[1]
+    
+        # Build grid adjacency
+        grid_adj = build_grid_adjacency(self.resolution)
+    
+        # Pose adjacency
+        pose_adj = pose_graph_state.get_adjacency_coo()
+    
+        # --- Coupling block ---
+        center_y, center_x = self.resolution[0] // 2, self.resolution[1] // 2
+        patch_size = 5
+    
+        grid_indices = []
+        for dy in range(-patch_size // 2, patch_size // 2 + 1):
+            for dx in range(-patch_size // 2, patch_size // 2 + 1):
+                gy = center_y + dy
+                gx = center_x + dx
+                if 0 <= gy < self.resolution[0] and 0 <= gx < self.resolution[1]:
+                    grid_idx = gy * self.resolution[1] + gx
+                    grid_indices.append(grid_idx)
+    
+        self.coupled_pose_indices = [15]  # hand nodes
+    
+        coupling_rows = []
+        coupling_cols = []
+        coupling_data = []
+    
+        for g_idx in grid_indices:
+            for p_idx in self.coupled_pose_indices:
+                coupling_rows.append(g_idx)
+                coupling_cols.append(p_idx)
+                coupling_data.append(1.0)  # static coupling strength
+    
+        coupling_shape = (grid_adj.shape[0], pose_adj.shape[0])
+        coupling = coo_matrix((coupling_data, (coupling_rows, coupling_cols)), shape=coupling_shape)
+    
+        # --- Combined Laplacian ---
+        L_coo = build_combined_laplacian(grid_adj, pose_adj, coupling)
+        L_csr = L_coo.tocsr()
+        L_csr_gpu = cupyx.scipy.sparse.csr_matrix(L_csr)
+    
+        self.extended_excitation: cp.ndarray = self.xp.zeros(
+            (self.N_grid + pose_graph_state.num_nodes,),
+            dtype=self.xp.float32
+        )
+    
+        self.propagator_kwargs["use_matrix"] = True
+        self.propagator_kwargs["laplacian_csr"] = L_csr_gpu
+        self.propagator_kwargs["shape"] = (self.resolution[0] * self.resolution[1] + pose_graph_state.num_nodes,)
+    
+        self.propagator = WavePropagatorGPU(**self.propagator_kwargs)
+        self.camera = camera
+        self.extractor = extractor
+    
+        log.info("✅ Pose graph with static coupling added.")
+
+    def add_pose_graph_old(self, camera: CameraSource, extractor: MediaPipePoseExtractor,
+                       pose_graph_state: PoseGraphState) -> None:
 
         self.use_matrix = True
         self.camera = camera
@@ -346,7 +409,6 @@ class RippleWaveVisualizer(VisualizerBase):
 
         log.debug(f"Recomputed display range: min {self.display_min:.3f}, max {self.display_max:.3f}")
 
-
     def add_excitation_source(self, source: ExcitationSourceBase):
         """Add an excitation source to the visualizer."""
 
@@ -363,47 +425,6 @@ class RippleWaveVisualizer(VisualizerBase):
         # Recompute display range after adding a new source
         self._recompute_display_range()
         source.subscribe("gain_changed", lambda g: self._recompute_display_range())
-
-    def update_visualization_old(self):
-        self.time += self.dt
-        weight = 1 / len(self.excitation_sources)
-    
-        for name, source in self.excitation_sources.items():
-            result: Dict[str, Any] = source(self.time)
-            self.excitation[:] += weight * result["excitation"]
-    
-            overlay_dict = result.get("overlay")
-            if overlay_dict:
-                self.overlay_image = result["excitation"]
-                self.overlay_mask = cp.asnumpy(overlay_dict["mask"]) if self.use_gpu else overlay_dict["mask"]
-    
-        self.propagator.add_excitation(self.excitation)
-        self.propagator.step()
-        self.Z[:] = self.propagator.get_state()
-    
-        Z_vis = cp.asnumpy(self.Z) if self.use_gpu else self.Z
-    
-        if self.overlay_image is not None and self.overlay_mask is not None:
-            alpha = 0.0
-            Z_vis[self.overlay_mask] = (
-                alpha * (cp.asnumpy(self.overlay_image[self.overlay_mask]) if self.use_gpu else self.overlay_image[self.overlay_mask])
-                + (1 - alpha) * Z_vis[self.overlay_mask]
-            )
-    
-        self.image_item.setImage(Z_vis, autoLevels=False)
-    
-        cfl = (self.speed * self.dt) / self.dx
-        if cfl > 1 / np.sqrt(2):
-            log.warning(f"⚠️ CFL condition violated: {cfl:.2f} > {1/np.sqrt(2):.2f}. Simulation may be unstable!")
-    
-        if not hasattr(self, 'log_counter_'):
-            self.log_counter_ = 0
-        self.log_counter_ += 1
-        if self.log_counter_ == 10:
-            log.debug(f"min: {Z_vis.min()}, max: {Z_vis.max()}, mean: {Z_vis.mean()}")
-            self.log_counter_ = 0
-    
-        self.excitation[:] = 0  # Reset excitation
 
     def update_visualization(self):
         self.time += self.dt
@@ -431,10 +452,21 @@ class RippleWaveVisualizer(VisualizerBase):
              # Prepare extended excitation vector
             flat_grid = self.excitation.ravel()
             self.extended_excitation[:self.N_grid] = flat_grid
+
+            """
+            TODO: Extend to coupled laplacian
+            """
+            # Get pose node excitation vector
+            pose_ex_vec = self.pose_graph_state()
+            
+            # Choose node indices to excite, e.g., hands and apply scaled velocity norms
+            for i in self.coupled_pose_indices:
+                self.extended_excitation[self.N_grid + i] = cp.clip(pose_ex_vec[i], 0, 1)
+
             self.propagator.add_excitation(self.extended_excitation)
 
-            assert (self.extended_excitation[self.N_grid:] == 0).all(), \
-                    "Extended excitation should be zero for pose graph nodes."
+            # assert (self.extended_excitation[self.N_grid:] == 0).all(), \
+            #         "Extended excitation should be zero for pose graph nodes."
         else:
             self.propagator.add_excitation(self.excitation)
         self.propagator.step()

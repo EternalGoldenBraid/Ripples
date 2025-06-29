@@ -23,6 +23,13 @@ class PoseGraphState:
         self.smooth_velocities = self.xp.zeros((num_nodes, 2), dtype=self.xp.float32)
         self.velocity_smoothing_alpha = velocity_smoothing_alpha
 
+    def __call__(self) -> np.ndarray:
+        """
+        Returns per-node excitation vector, here using velocity norms.
+        Shape: (num_nodes,)
+        """
+        vnorms = np.linalg.norm(self.get_velocities(), axis=1)
+        return vnorms
 
     def get_adjacency_coo(self) -> coo_matrix:
         """

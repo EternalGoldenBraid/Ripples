@@ -15,7 +15,7 @@ from audioviz.sources.synthetic import SyntheticPointExcitation
 
 # -------------------- Parameters --------------------
 RIPPLE_CONF = dict(
-    plane_size_m=(10., 10.),
+    plane_size_m=(1., 1.),
     dx=5e-3,
     speed=10.0,
     damping=0.90,
@@ -61,7 +61,7 @@ def test_ripple_with_pose_and_synthetic() -> None:
         dx=RIPPLE_CONF["dx"],
         resolution=ripple.resolution,
         position=(0.5, 0.5),
-        frequency=400,
+        frequency=40,
         speed=RIPPLE_CONF["speed"],
         backend=ripple.backend,
     )
