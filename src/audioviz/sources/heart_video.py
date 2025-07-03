@@ -1,10 +1,14 @@
 from typing import Tuple, Union, Optional, List, Any, Iterator, Dict
 from pathlib import Path
+from itertools import cycle
+
+
 import numpy as np
 import cupy as cp
 import cv2
 from PyQt5.QtCore import Qt
 from loguru import logger as log
+
 
 from .base import ExcitationSourceBase
 from audioviz.audio_processing.audio_processor import AudioProcessor
@@ -33,8 +37,9 @@ class HeartVideoExcitation(ExcitationSourceBase):
                  source : Union[str, Path, np.ndarray],
                  backend,
                  resolution : Tuple[int, int],
+                 amplitude: float = 0.0,
                  position   : Tuple[float, float] = (0.5, 0.5),
-                 name       : str = "Image Pulse",
+                 name       : str = "heart",
                  audio_processor: Optional[AudioProcessor] = None,
                  ):
 
@@ -62,7 +67,7 @@ class HeartVideoExcitation(ExcitationSourceBase):
             """
         )
 
-        self.amplitude: float = 0.0
+        self.amplitude: float = amplitude
         self._prev_mask: Optional[Union[np.ndarray, cp.ndarray]] = None
 
     def load_video(self, source: Union[str, Path, np.ndarray]):
@@ -94,6 +99,8 @@ class HeartVideoExcitation(ExcitationSourceBase):
             self.frames = self.xp.asarray(np.stack(frames_np), dtype=self.xp.float32)
         else:                                   # numpy clip already supplied
             self.frames = self.xp.asarray(source, dtype=self.xp.float32) / source.max()
+
+        self.frame_iter: Iterator[Union[np.ndarray, cp.ndarray]] = cycle(self.frames)
         
     def get_controls(self):
         H, W = self.output_resolution
@@ -146,13 +153,16 @@ class HeartVideoExcitation(ExcitationSourceBase):
 
     # ---------------------------------------------------------------- runtime
     def __call__(self, t: float, channel_idx=1) -> Dict[str, Any]:
-        freq = (self.audio_processor.current_top_k_frequencies[channel_idx][0] \
-                if self.follow_audio else self.manual_freq)
+        # freq = (self.audio_processor.current_top_k_frequencies[channel_idx][0] \
+        #         if self.follow_audio else self.manual_freq)
+        #
+        # phase = (t * freq) % 1.0                 # in [0,1)
+        # frame_idx = int(phase * self.num_frames) # 0..num_frames-1
+        # 
+        # frame = self.frames[frame_idx]           # NumPy or CuPy slice
 
-        phase = (t * freq) % 1.0                 # in [0,1)
-        frame_idx = int(phase * self.num_frames) # 0..num_frames-1
-        
-        frame = self.frames[frame_idx]           # NumPy or CuPy slice
+        self.out[:] = 0.0  # reset output field
+        frame = next(self.frame_iter)
 
         mask  = self.xp.asarray(frame, dtype=self.xp.float32)
         H_out, W_out = self.output_resolution
@@ -163,17 +173,20 @@ class HeartVideoExcitation(ExcitationSourceBase):
         mask_resized = resize_array(mask, target_h, target_w, xp=self.xp)
         
         # placement slice (again use field size)
-        cx = int(self.position[0] * (W_out - 1))
-        cy = int(self.position[1] * (H_out - 1))
+        cx = int(self.position[1] * (W_out - 1))
+        cy = int(self.position[0] * (H_out - 1))
         h, w = mask_resized.shape
         top    = max(0, cy - h // 2)
         left   = max(0, cx - w // 2)
         bottom = min(H_out, top  + h)
         right  = min(W_out, left + w)
         mask_crop = mask_resized[:bottom-top, :right-left]
+        mask_crop = mask_crop - self.xp.mean(mask_crop)
 
         # self.out[top:bottom,left:right] = mask_crop * self.amplitude
-        self.out[top:bottom, left:right] = self.amplitude * (mask_crop - np.mean(mask_crop))
+
+        self.out[top:bottom, left:right] = self.amplitude * mask_crop
+        overlay_mask = self.out > 0.0
 
         if not hasattr(self, 'log_counter_'):
             self.log_counter_ = 0
@@ -182,8 +195,8 @@ class HeartVideoExcitation(ExcitationSourceBase):
             log.debug(f"min: {self.out.min()}, max: {self.out.max()}, mean: {self.out.mean()}")
             self.log_counter_ = 0
 
-        overlay_mask = self.xp.zeros_like(self.out, dtype=bool)
-        overlay_mask[top:bottom, left:right] = True
+        # overlay_mask = self.xp.zeros_like(self.out, dtype=bool)
+        # overlay_mask[top:bottom, left:right] = True
         return {
             'excitation': self.out,
                 'overlay': {'mask': overlay_mask},
