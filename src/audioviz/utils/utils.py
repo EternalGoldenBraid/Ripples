@@ -1,5 +1,7 @@
 from typing import Union, Optional
 from functools import wraps
+from contextlib import contextmanager
+import time
 
 from loguru import logger as log
 import numpy as np
@@ -35,22 +37,11 @@ def resize_array(img, target_h: int, target_w: int, xp):
     # order=1 → bilinear, matches cv2.INTER_AREA quality for downsizing
     return cnd.zoom(img, zoom=(zoom_y, zoom_x), order=1)
 
-
-# def logged_setter(name: Optional[str] = None):
-#     """
-#     Decorator to automatically log parameter changes in setter methods.
-#
-#     Parameters
-#     ----------
-#     name : str, optional
-#         A human-readable label to show in the debug log.
-#         If not provided, defaults to the function's name.
-#     """
-#     def decorator(func):
-#         @wraps(func)
-#         def wrapper(self, val, *args, **kwargs):
-#             result = func(self, val, *args, **kwargs)
-#             log.debug(f"{name or func.__name__} set to {val:.3f}")
-#             return result
-#         return wrapper
-#     return decorator
+@contextmanager
+def timed(label: str):
+    start = time.perf_counter()
+    try:
+        yield
+    finally:
+        elapsed = time.perf_counter() - start
+        log.info(f"⏱️ {label} took {elapsed:,.2f} s")
