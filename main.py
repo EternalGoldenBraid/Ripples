@@ -72,7 +72,7 @@ HOP_RATIO  = 1 / 4
 USE_3D = True  # or False
 
 RIPPLE_CONF = dict(
-    plane_size_m=(10., 10.),
+    plane_size_m=(50., 50.),
     # plane_size_m=(50., 25.),
     # plane_size_m=(100., 100.),
     dx=5e-2,
