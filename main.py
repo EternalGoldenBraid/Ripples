@@ -29,7 +29,7 @@ from audioviz.audio_processing.audio_processor import AudioProcessor
 from audioviz.utils.audio_devices import select_devices
 from audioviz.utils.guitar_profiles import GuitarProfile
 from audioviz.visualization.spectrogram_visualizer import SpectrogramVisualizer
-from audioviz.visualization.ripple_wave_visualizer import RippleWaveVisualizer
+from audioviz.visualization.ripple_wave_visualizer import RippleWaveVisualizer, RippleWaveVisualizer3D
 from audioviz.visualization.pitch_helix_visualizer import PitchHelixVisualizer
 
 from audioviz.sources.pose.mediapipe_pose_source import MediaPipePoseExtractor
@@ -50,8 +50,12 @@ FLAGS = dict(
     use_pose_graph=False,
 
     use_audio_excitation=True,
-    use_heart_video=False,
+    use_heart_video=True,
     use_synthetic=True,
+
+    # use_audio_excitation=True,
+    # use_heart_video=False,
+    # use_synthetic=True,
 )
 
 HEART_VIDEO_PATH = Path("Data/GeneratedHearts/test_e050_p002.avi")
@@ -65,9 +69,12 @@ N_FFT      = 256
 WINDOW_MS  = 20
 HOP_RATIO  = 1 / 4
 
+USE_3D = True  # or False
+
 RIPPLE_CONF = dict(
+    plane_size_m=(10., 10.),
     # plane_size_m=(50., 25.),
-    plane_size_m=(100., 100.),
+    # plane_size_m=(100., 100.),
     dx=5e-2,
     speed=10.0,
     damping=0.90,
@@ -174,7 +181,13 @@ def main() -> None:
         spectro.show()
 
     if FLAGS["show_ripples"]:
-        ripple = RippleWaveVisualizer(**RIPPLE_CONF)
+
+        if USE_3D:
+            ripple = RippleWaveVisualizer3D(**RIPPLE_CONF)
+        else:
+            ripple = RippleWaveVisualizer(**RIPPLE_CONF)
+
+        # ripple = RippleWaveVisualizer(**RIPPLE_CONF)
         ripple.setWindowTitle("Ripple Field")
         ripple.resize(800, 600)
 

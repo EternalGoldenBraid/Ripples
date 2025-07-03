@@ -120,12 +120,17 @@ class RippleEngine:
 
     def update(self, t: float):
         self.time = t
-        weight = 1 / max(len(self.sources), 1)
 
         for name, source in self.sources.items():
             result = source(t)
+
             if name != 'heart':
-                self.excitation[:] += weight * result["excitation"]
+                weight = 1 / max(len(self.sources), 1)
+            else:
+                weight = 0.001
+
+            self.excitation[:] += weight * result["excitation"]
+
 
         if self.pose_graph_state and self.camera and self.extractor:
             frame = self.camera.read()
