@@ -49,13 +49,13 @@ FLAGS = dict(
     show_helix=False,
     use_pose_graph=False,
 
-    use_audio_excitation=True,
-    use_heart_video=True,
-    use_synthetic=True,
-
     # use_audio_excitation=True,
-    # use_heart_video=False,
+    # use_heart_video=True,
     # use_synthetic=True,
+
+    use_audio_excitation=True,
+    use_heart_video=False,
+    use_synthetic=False,
 )
 
 HEART_VIDEO_PATH = Path("Data/GeneratedHearts/test_e050_p002.avi")
@@ -69,13 +69,13 @@ N_FFT      = 256
 WINDOW_MS  = 20
 HOP_RATIO  = 1 / 4
 
-USE_3D = True  # or False
+USE_3D = False # or False
 
 RIPPLE_CONF = dict(
     plane_size_m=(50., 50.),
     # plane_size_m=(50., 25.),
     # plane_size_m=(100., 100.),
-    dx=5e-2,
+    dx=5e-1,
     speed=10.0,
     damping=0.90,
     use_gpu=True,
@@ -165,7 +165,19 @@ def main() -> None:
     # Pump raw input queue -> processor
     timer = QtCore.QTimer()
     timer.setInterval(int(io_conf["io_blocksize"] / sr * 1000))
-    timer.timeout.connect(processor.process_pending_audio)
+    # timer.timeout.connect(processor.process_pending_audio)
+    def pump_audio():
+        processor.process_pending_audio()
+        block = processor.latest_audio(io_conf["io_blocksize"])
+        ripple.engine.feed_audio(block)
+    
+        # Now run engine update + visual update in sync
+        ripple.engine.time += ripple.engine.dt
+        ripple.engine.update(ripple.engine.time)
+        ripple.update_visualization()  # manual visual update after physics step
+
+    timer.timeout.connect(pump_audio)
+
     timer.start()
 
     # ---------------------------------------------------------------- Visualizers

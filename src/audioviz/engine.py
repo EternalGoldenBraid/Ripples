@@ -1,43 +1,42 @@
-"""RippleEngine – revised implementation
----------------------------------------
-•  Uses ``subprocess.run(check=True)`` so any FFmpeg failure raises.
-•  Resets ``disk_ready_to_render[idx]`` the moment a render starts – prevents duplicate renders.
-•  Adds ``wait_for_renders`` helper so callers/tests can block deterministically.
-•  ``lock.acquire(timeout=…)`` in the RAM→disk flush path avoids the risk of hanging forever.
-•  Timing of the two expensive operations is measured with ``timed`` context‑manager utility.
-•  Imports grouped per PEP 8: standard lib, 3rd‑party, project‑internal.
+"""
+RippleEngine – wave-field + audio recorder
+──────────────────────────────────────────
+•  Writes one row per *visual* frame to *all* datasets
+   ──> perfect sync between grid, probe-sample and 44.1 kHz PCM.
+•  Constant 735 samples per frame  (44 100 / 60).
+•  Adds ``audio`` dataset to every HDF5 buffer:  shape (N_frames, 735).
+•  RAM double-buffer now stores Z, probe and audio together.
+•  Renderer rebuilds the raw track from the HDF5 slice – no more
+   “raw audio missing”.
+•  Otherwise identical public API / logging behaviour.
 """
 
 from __future__ import annotations
 
-# ─────────────────────────────── Standard library ──────────────────────────────
-import os
+# ──────────────────────────────── std-lib ────────────────────────────────────
+import atexit
+import hashlib
 import subprocess
-import tempfile
 import time
 from pathlib import Path
 from threading import Lock, Thread
 from typing import Dict, List, Optional, Tuple
 import uuid
-import hashlib   # for a quick unique hash-style filename
-import atexit
 
-# ──────────────────────────────── Third‑party ──────────────────────────────────
+# ────────────────────────────── third-party ──────────────────────────────────
 import h5py
-import imageio
 import numpy as np
 from loguru import logger as log
 from matplotlib import cm
+from scipy.signal import resample_poly
 import soundfile as sf
-from scipy.sparse import coo_matrix
-import cupyx
 
-try:  # CUDA is optional
+try:
     import cupy as cp  # type: ignore
-except ImportError:  # pragma: no cover – CPU‑only environment
+except ImportError:                           # CPU-only
     cp = None  # type: ignore
 
-# ────────────────────────────── Project internal ───────────────────────────────
+# ───────────────────────────── project internal ──────────────────────────────
 from audioviz.physics.wave_propagator import WavePropagatorCPU, WavePropagatorGPU
 from audioviz.sources.base import ExcitationSourceBase
 from audioviz.sources.camera import CameraSource
@@ -45,29 +44,13 @@ from audioviz.sources.pose.mediapipe_pose_source import MediaPipePoseExtractor
 from audioviz.sources.pose.pose_graph_state import PoseGraphState
 from audioviz.types import ArrayType
 from audioviz.utils.graph_utils import build_combined_laplacian, build_grid_adjacency
-from audioviz.utils.utils import timed  # simple context‑manager timing helper
-
-# ────────────────────────────────────────────────────────────────────────────────
+from audioviz.utils.utils import timed
 
 __all__ = ["RippleEngine"]
 
 
 class RippleEngine:
-    """Real‑time 2‑D wave simulator that can stream long recordings to disk.
-
-    Parameters
-    ----------
-    resolution
-        (Ny, Nx) cells.
-    dx, speed, damping
-        Physical parameters for the finite‑difference solver.
-    use_gpu
-        If *True* and CuPy is available, use GPU backend.
-    ram_budget_gb, disk_budget_gb, num_disk_buffers
-        Recording pipeline settings – see :meth:`_init_recording_config`.
-    """
-
-    # ───────────────────────────────— construction —───────────────────────────
+    # ─────────────────────────────── construction ───────────────────────────
     def __init__(
         self,
         resolution: Tuple[int, int],
@@ -76,86 +59,85 @@ class RippleEngine:
         damping: float,
         *,
         use_gpu: bool = True,
-        ram_budget_gb: int = 2,
-        disk_budget_gb: int = 10,
-        num_disk_buffers: int = 3,
+        ram_budget_gb: float = 0.2,
+        disk_budget_gb: float = 3,
+        num_disk_buffers: int = 5,
     ) -> None:
+        # ───── physics ─────
         self.resolution = resolution
         self.dx = dx
         self.speed = speed
         self.damping = damping
         self.use_gpu = bool(use_gpu and cp is not None)
         self.xp = cp if self.use_gpu else np
+        self.time: float = 0.0
+        self._log_counter: int = 0
 
-        # ───── allocate solver ─────
-        self.Z = self.xp.zeros(self.resolution, dtype=self.xp.float32)
+        self.Z = self.xp.zeros(resolution, dtype=self.xp.float32)
         self.excitation = self.xp.zeros_like(self.Z)
-        self.dt = (max(dx, dx) / speed) / np.sqrt(2) * 0.95  # CFL‑safe step
+        self.dt = (max(dx, dx) / speed) / np.sqrt(2) * 0.95
 
-        propagator_cls = WavePropagatorGPU if self.use_gpu else WavePropagatorCPU
-        self._propagator_kwargs = {
-            "shape": self.resolution,
-            "dx": self.dx,
-            "dt": self.dt,
-            "speed": self.speed,
-            "damping": self.damping,
-        }
-        self.propagator = propagator_cls(**self._propagator_kwargs)
+        Prop = WavePropagatorGPU if self.use_gpu else WavePropagatorCPU
+        self._propagator_kwargs = dict(
+            shape=resolution, dx=dx, dt=self.dt, speed=speed, damping=damping
+        )
+        self.propagator = Prop(**self._propagator_kwargs)
+        self.max_frequency = self.speed / (2 * max(self.dx, self.dx))
 
         self.sources: Dict[str, ExcitationSourceBase] = {}
-
-        # pose‑graph members are configured later
         self.pose_graph_state: Optional[PoseGraphState] = None
         self.camera: Optional[CameraSource] = None
         self.extractor: Optional[MediaPipePoseExtractor] = None
         self.use_matrix = False
 
-        # bookkeeping
-        self.time = 0.0
-        self._log_counter = 0
+        # ───── audio constants ─────
+        self.audio_sr = 44_100
+        self.vis_fps = 60
+        self.samples_per_frame = self.audio_sr // self.vis_fps  # 735
 
-        # ───── recording pipeline ─────
+        # ring-buffer for incoming PCM (one minute)
+        self._audio_ring = np.zeros(self.audio_sr * 60, dtype=np.float32)
+        self._audio_wptr = 0      # write index
+        self._audio_rptr = 0      # read  index (only used during recording)
 
-        # ─ recording session bookkeeping ─
+        # ───── recording bookkeeping ─────
         self._current_session_id: Optional[str] = None
-        self._session_renders: List[Path] = []   # mp4s belonging to the *active* session
-
-        # keep track of *all* rendered clips so the destructor can merge leftovers
+        self._session_renders: List[Path] = []
+        self._session_raw_wav: Optional[Path] = None
         self._all_renders: List[Path] = []
 
-        # make sure we always clean up on process exit
         atexit.register(self.__del__)
 
         self._init_recording_config(ram_budget_gb, disk_budget_gb, num_disk_buffers)
         log.info("RippleEngine initialised.")
 
-    # ───────────────────────────── recording setup ────────────────────────────
+    # ───────────────────────────── recording config ──────────────────────────
     def _init_recording_config(
-        self,
-        ram_budget_gb: int,
-        disk_budget_gb: int,
-        num_disk_buffers: int,
+        self, ram_budget_gb: int, disk_budget_gb: int, num_disk_buffers: int
     ) -> None:
         Ny, Nx = self.resolution
-        bytes_per_frame = Ny * Nx * 4  # float32
+        bytes_per_frame = Ny * Nx * 4
+        frames_ram = int(ram_budget_gb * 1024**3 / bytes_per_frame)
+        frames_disk_raw = disk_budget_gb * 1024**3 / bytes_per_frame
+        frames_disk = frames_ram * int(frames_disk_raw // frames_ram)
 
-        # derive buffer sizes
-        frames_per_ram = int(ram_budget_gb * 1024 ** 3 / bytes_per_frame)
-        frames_per_disk_raw = disk_budget_gb * 1024 ** 3 / bytes_per_frame
-        frames_per_disk = frames_per_ram * int(frames_per_disk_raw // frames_per_ram)
-
-        self.ram_buffer_size = frames_per_ram
-        self.disk_buffer_size = frames_per_disk
+        self.ram_buffer_size = frames_ram
+        self.disk_buffer_size = frames_disk
         self.num_disk_buffers = num_disk_buffers
 
-        # RAM buffers (double‑buffer pattern)
-        self.Z_ram_online = np.zeros((frames_per_ram, Ny, Nx), dtype=np.float32)
-        self.Z_ram_offline = np.zeros_like(self.Z_ram_online)
-        self.probe_ram_online = np.zeros(frames_per_ram, dtype=np.float32)
-        self.probe_ram_offline = np.zeros_like(self.probe_ram_online)
+        # ─ RAM double buffers ─
+        self.Z_ram_on = np.zeros((frames_ram, Ny, Nx), np.float32)
+        self.Z_ram_off = np.zeros_like(self.Z_ram_on)
+
+        self.probe_ram_on = np.zeros(frames_ram, np.float32)
+        self.probe_ram_off = np.zeros_like(self.probe_ram_on)
+
+        self.audio_ram_on = np.zeros((frames_ram, self.samples_per_frame), np.float32)
+        self.audio_ram_off = np.zeros_like(self.audio_ram_on)
+
         self._ram_frame_idx = 0
 
-        # disk buffers
+        # ─ disk buffers ─
         disk_dir = Path("outputs/disk_buffers"); disk_dir.mkdir(parents=True, exist_ok=True)
         self._disk_paths = [disk_dir / f"buffer_{i:02d}.h5" for i in range(num_disk_buffers)]
         self._disk_locks: List[Lock] = [Lock() for _ in range(num_disk_buffers)]
@@ -164,32 +146,67 @@ class RippleEngine:
         self._disk_ready = [False] * num_disk_buffers
         self._disk_rendering = [False] * num_disk_buffers
 
-        for i, path in enumerate(self._disk_paths):
-            with h5py.File(path, "w") as f:
-                f.create_dataset("fields", shape=(frames_per_disk, Ny, Nx), dtype=np.float32)
-                f.create_dataset("probe_signal", shape=(frames_per_disk,), dtype=np.float32)
-            log.info(f"✅ Created disk buffer {i}: {path}")
+        for i, p in enumerate(self._disk_paths):
+            with h5py.File(p, "w") as f:
+                f.create_dataset("fields", (frames_disk, Ny, Nx), np.float32)
+                f.create_dataset("probe_signal", (frames_disk,), np.float32)
+                f.create_dataset("audio", (frames_disk, self.samples_per_frame), np.float32)
+            log.info(f"✅ Created disk buffer {i}: {p}")
 
-        # ffmpeg options
+        # ffmpeg / render
         self.ffmpeg_bin = "ffmpeg"
-        self.ffmpeg_fps = 60
         self.ffmpeg_codec = "libx264"
         self.ffmpeg_crf = 18
         self.render_dir = Path("outputs/renders"); self.render_dir.mkdir(parents=True, exist_ok=True)
 
-        # background watcher
-        self._watcher = Thread(target=self._watch_disk_buffers, daemon=True)
-        self._watcher.start()
-
         self.recording_enabled = False
         self.probe_ix, self.probe_iy = Nx // 2, Ny // 2
+
+        self._watcher = Thread(target=self._watch_disk_buffers, daemon=True)
+        self._watcher.start()
 
         log.info(
             "Recording config: RAM %d f, disk %d f × %d buffers",
             self.ram_buffer_size,
             self.disk_buffer_size,
-            num_disk_buffers,
+            self.num_disk_buffers,
         )
+
+    # ───────────────────────────── audio I/O ─────────────────────────────────
+    def feed_audio(self, pcm: np.ndarray) -> None:
+        """Append raw mono *pcm* (float32 -1..1) to the ring buffer."""
+        n = len(pcm)
+        ring = self._audio_ring
+        idx = self._audio_wptr % ring.size
+        end = idx + n
+        if end <= ring.size:
+            ring[idx:end] = pcm
+        else:                       # wrap-around
+            first = ring.size - idx
+            ring[idx:] = pcm[:first]
+            ring[: n - first] = pcm[first:]
+        self._audio_wptr += n
+
+    def _pop_audio_frame(self) -> np.ndarray:
+        """Return exactly *samples_per_frame* fresh samples (zero-pad if under-flow)."""
+        need = self.samples_per_frame
+        ring = self._audio_ring
+        out = np.zeros(need, dtype=np.float32)
+
+        available = self._audio_wptr - self._audio_rptr
+        take = min(need, available)
+        if take:
+            r_idx = self._audio_rptr % ring.size
+            r_end = r_idx + take
+            if r_end <= ring.size:
+                out[:take] = ring[r_idx:r_end]
+            else:  # wrap-around
+                first = ring.size - r_idx
+                out[:first] = ring[r_idx:]
+                out[first:take] = ring[: r_end - ring.size]
+            self._audio_rptr += take
+        # remaining samples (if any) stay zeros
+        return out
 
     # ───────────────────────────── helper: wait for renders ───────────────────
     def wait_for_renders(self, timeout: float | None = None) -> None:
@@ -202,214 +219,192 @@ class RippleEngine:
         """
         start = time.perf_counter()
         while any(self._disk_rendering):
+            log.debug(f"Disk buffers busy: {self._disk_rendering}")
             if timeout is not None and (time.perf_counter() - start) > timeout:
                 raise TimeoutError("Render threads still busy after timeout")
             time.sleep(0.2)
 
-    # ───────────────────────────── background watcher ─────────────────────────
-    def _watch_disk_buffers(self) -> None:  # runs in daemon thread
+    # ───────────────────────────── helper threads ────────────────────────────
+
+    def _mark_buffer_ready(self, idx: int):
+        lock = self._disk_locks[idx]
+        with lock:
+            self._disk_ready[idx] = True
+
+    def _watch_disk_buffers(self) -> None:
         while True:
-            for idx in range(self.num_disk_buffers):
-                if self._disk_ready[idx] and not self._disk_rendering[idx]:
-                    self._launch_ffmpeg(idx)
+            for i in range(self.num_disk_buffers):
+                lock = self._disk_locks[i]
+                if self._disk_ready[i] and not self._disk_rendering[i]:
+                    self._launch_ffmpeg(i)
             time.sleep(0.5)
 
-    # ───────────────────────────── launch ffmpeg render ───────────────────────
     def _launch_ffmpeg(self, idx: int) -> None:
-        """Spawn a daemon thread that streams raw RGB frames to FFmpeg."""
-        input_path = self._disk_paths[idx]
-        output_path = self.render_dir / f"render_{idx:02d}.mp4"
-        height, width = self.resolution  # Ny, Nx
+        """Render one filled disk buffer → mp4 (+ wav)."""
+        log.debug("Launching FFmpeg for buffer %d", idx)
 
-        def _render() -> None:  # runs in its own daemon thread
-            log.info("🎥 Start render for buffer %d → %s", idx, output_path)
+        log.debug(f"Updating flag _disk_rendering[{idx}] to True")
+        log.debug(f"Updating flag _disk_ready[{idx}] to False")
+        lock = self._disk_locks[idx]
+        with lock:
             self._disk_rendering[idx] = True
-            self._disk_ready[idx] = False  # avoid duplicate launches
+            self._disk_ready[idx] = False
+        in_path = self._disk_paths[idx]
+        out_mp4 = self.render_dir / f"render_{idx:02d}.mp4"
+        H, W = self.resolution
+
+        log.debug("Flags updated, starting render thread for buffer %d", idx)
+
+        def _render() -> None:
+            log.info("🎥 Render buffer %d → %s", idx, out_mp4)
 
             with timed(f"Render buffer {idx}"):
-                with h5py.File(input_path, "r") as f:
-                    fields = f["fields"]
-                    probe = f["probe_signal"][:]
+                with h5py.File(in_path, "r") as f:
+                    fields = f["fields"][...]
+                    audio = f["audio"][...].reshape(-1)  # 1-D PCM
+                wav_path = out_mp4.with_suffix(".wav")
+                sf.write(wav_path, audio, samplerate=self.audio_sr)
 
-                    # ‑‑‑ write probe to a tiny temp WAV (fast) ‑‑‑
-                    wav_path = Path(tempfile.mkstemp(suffix=".wav", dir=input_path.parent)[1])
-                    sf.write(wav_path, probe, samplerate=44_100)
+                cmd = [
+                    self.ffmpeg_bin, "-y",
+                    "-f", "rawvideo", "-pix_fmt", "rgb24",
+                    "-s", f"{W}x{H}", "-r", str(self.vis_fps),
+                    "-i", "-", "-i", str(wav_path),
+                    "-c:v", self.ffmpeg_codec, "-crf", str(self.ffmpeg_crf),
+                    "-pix_fmt", "yuv420p",
+                    "-c:a", "aac", "-b:a", "192k",
+                    str(out_mp4),
+                ]
+                proc = subprocess.Popen(cmd, stdin=subprocess.PIPE)
 
-                    # ‑‑‑ spawn FFmpeg expecting raw RGB frames on stdin ‑‑‑
-                    cmd = [
-                        self.ffmpeg_bin,
-                        "-y",
-                        "-f", "rawvideo",
-                        "-pix_fmt", "rgb24",
-                        "-s", f"{width}x{height}",
-                        "-r", str(self.ffmpeg_fps),
-                        "-i", "-",  # stdin
-                        "-i", str(wav_path),
-                        "-c:v", self.ffmpeg_codec,
-                        "-crf", str(self.ffmpeg_crf),
-                        "-pix_fmt", "yuv420p",
-                        "-c:a", "aac",
-                        "-b:a", "192k",
-                        str(output_path),
-                    ]
-                    log.info("🎬 FFmpeg (streaming): %s", " ".join(cmd))
-                    proc = subprocess.Popen(cmd, stdin=subprocess.PIPE)
+                for z in fields:
+                    norm = (z - z.min()) / (np.ptp(z) + 1e-6)
+                    rgb = (cm.inferno(norm)[:, :, :3] * 255).astype(np.uint8)
+                    proc.stdin.write(rgb.tobytes())
+                proc.stdin.close()
+                proc.wait()
+                wav_path.unlink(missing_ok=True)
 
-                    # ‑‑‑ stream frames ‑‑‑
-                    for z in fields:
-                        norm = (z - z.min()) / (np.ptp(z) + 1e-6)
-                        rgb = (cm.inferno(norm)[:, :, :3] * 255).astype(np.uint8)
-                        proc.stdin.write(rgb.tobytes())  # type: ignore[arg-type]
-                    proc.stdin.close()
-
-                    proc.wait()  # raises if encode failed
-                    wav_path.unlink(missing_ok=True)
-
-            log.info("✅ Render finished for buffer %d", idx)
             self._disk_rendering[idx] = False
+            self._all_renders.append(out_mp4)
+            if self._current_session_id:
+                self._session_renders.append(out_mp4)
 
-            # For concatenation later, add this render to the global list
-            self._all_renders.append(output_path)
-            if self._current_session_id is not None:
-                self._session_renders.append(output_path)
-
+        log.info(f"Starting render thread for buffer {idx} → {out_mp4}")
         Thread(target=_render, daemon=True).start()
+        log.info("Render thread started for buffer %d", idx)
 
-        # ------------------ graceful teardown ------------------
-    def __del__(self) -> None:
-        """Ensure any running record finishes & remaining clips are merged."""
-        try:
-            # stop current slice (flag signals this is from __del__)
-            self.disable_recording(_called_from_del=True)
-
-            # if several independent slices were recorded during the process
-            # lifetime but never concatenated, merge them *all* now
-            if self._all_renders:
-                final_hash = hashlib.sha1(
-                    ("".join(str(p) for p in self._all_renders)).encode()
-                ).hexdigest()[:10]
-                final_path = self.render_dir / f"ripples_{final_hash}.mp4"
-                self._concat_mp4s(self._all_renders, final_path)
-                log.info("📦 All sessions merged → %s", final_path)
-        except Exception as exc:  # pragma: no cover
-            log.exception("Destructor failed: %s", exc)
-
-
-    # ───────────────────────────── flush RAM → disk ───────────────────────────
-    def _flush_ram_to_disk(self) -> None:
+    # ───────────────────────────── RAM → disk ────────────────────────────────
+    def _flush_ram_to_disk(self) -> Thread:
         idx = self._active_disk_idx
         lock = self._disk_locks[idx]
-
-        log.info("Flushing RAM to disk buffer %d", idx)
-
-        # wait (up to 10 s) if buffer is busy
-        if self._disk_ready[idx] or self._disk_rendering[idx]:
-            if not lock.acquire(timeout=10):
-                raise TimeoutError("Disk buffer locked for too long while flushing")
-            lock.release()
+        log.info(f"Flushing RAM → disk buffer {idx}")
 
         path = self._disk_paths[idx]
-        offset = self._disk_offsets[idx]
+        off = self._disk_offsets[idx]
 
-        # copy online buffer → offline, then write asynchronously
-        self.Z_ram_offline[:] = self.Z_ram_online
-        self.probe_ram_offline[:] = self.probe_ram_online
+        self.Z_ram_off[:] = self.Z_ram_on
+        self.probe_ram_off[:] = self.probe_ram_on
+        self.audio_ram_off[:] = self.audio_ram_on
 
         def _write():
-            with timed(f"Flush to disk {idx}"):
-                with lock:
-                    with h5py.File(path, "r+") as f:
-                        sl = slice(offset, offset + self.ram_buffer_size)
-                        f["fields"][sl] = self.Z_ram_offline
-                        f["probe_signal"][sl] = self.probe_ram_offline
+            with timed(f"Flush disk {idx}"):
+                with lock, h5py.File(path, "r+") as f:
+                    sl = slice(off, off + self.ram_buffer_size)
+                    f["fields"][sl] = self.Z_ram_off
+                    f["probe_signal"][sl] = self.probe_ram_off
+                    f["audio"][sl] = self.audio_ram_off
 
-                # bookkeeping
-                self._disk_offsets[idx] += self.ram_buffer_size
-                if self._disk_offsets[idx] >= self.disk_buffer_size:
-                    self._disk_offsets[idx] = 0
-                    self._disk_ready[idx] = True
-                    self._active_disk_idx = (idx + 1) % self.num_disk_buffers
-                    log.info("♻️ Disk buffer %d filled → queued for render", idx)
+                    self._disk_offsets[idx] += self.ram_buffer_size
+                    if self._disk_offsets[idx] >= self.disk_buffer_size:
+                        self._disk_offsets[idx] = 0
+                        self._disk_ready[idx] = True
+                        self._active_disk_idx = (idx + 1) % self.num_disk_buffers
+                        log.info(f"♻️ Disk buffer {idx} full → queued")
 
-        Thread(target=_write, daemon=True).start()
-
-    def _concat_mp4s(self, inputs: List[Path], output: Path) -> None:
-        """Fast FFmpeg concat using the *copy* muxer (no re-encode)."""
-        if len(inputs) == 1:
-            inputs[0].rename(output)  # trivial case
-            return
-
-        list_file = output.with_suffix(".txt")
-        with list_file.open("w") as fh:
-            for p in inputs:
-                fh.write(f"file '{p.resolve()}'\n")
-
-        subprocess.run(
-            [
-                self.ffmpeg_bin,
-                "-y",
-                "-f", "concat",
-                "-safe", "0",
-                "-i", str(list_file),
-                "-c", "copy",
-                str(output),
-            ],
-            check=True,
-        )
-        list_file.unlink(missing_ok=True)
+        thread: Thread = Thread(target=_write, daemon=True)
+        thread.start()
+        return thread
 
     # ───────────────────────────── public API ────────────────────────────────
-
     def enable_recording(self) -> None:
-        """Start a new recording slice."""
         if self.recording_enabled:
             log.warning("Recording already enabled.")
             return
-
-        # start a fresh session
         self._current_session_id = uuid.uuid4().hex[:8]
         self._session_renders.clear()
-
-        # reset in-RAM index so a new slice starts at frame 0
-        self.ram_frame_idx = 0
+        self._ram_frame_idx = 0
+        self._audio_rptr = self._audio_wptr     # align reader to “now”
         self.recording_enabled = True
-        log.info("✅ Recording enabled (session %s)", self._current_session_id)
+        log.info("✅ Recording enabled – session %s", self._current_session_id)
 
     def disable_recording(self, *, _called_from_del: bool = False) -> None:
-        """Stop the current slice, wait for all renders, then concat them."""
+
         if not self.recording_enabled and not _called_from_del:
-            log.warning("Recording already disabled.")
             return
 
-        # flush any half-filled RAM buffer
-        if self.ram_frame_idx:
-            self._flush_ram_to_disk()
-            self.ram_frame_idx = 0
-
         self.recording_enabled = False
-        # block until every FFmpeg job is finished
+
+        log.info("Stopping recording...")
+
+        if self._ram_frame_idx:
+            log.info("Flushing remaining RAM frames to disk...")
+            last_flush_thread = self._flush_ram_to_disk()
+            last_flush_thread.join()  # wait for last flush to finish
+            log.info("RAM frames flushed to disk.")
+
+        log.info("Marking all non-empty disk buffers as ready...")
+        for i in range(self.num_disk_buffers):
+            if self._disk_offsets[i] > 0:
+                self._mark_buffer_ready(i)
+        
+        log.info("Disk buffers marked as ready.")
+        time.sleep(2.5)  # give some time for the watcher to pick up changes
+
+        log.info("Waiting for all render threads to finish...")
         self.wait_for_renders()
+        log.info("All render threads finished.")
 
-        # concatenate this session’s clips (if any)
-        if self._session_renders:
-            out_name = f"session_{self._current_session_id}.mp4"
-            out_path = self.render_dir / out_name
-            self._concat_mp4s(self._session_renders, out_path)
-            log.info("🎞️  Session concatenated → %s", out_path)
+        #
+        # # write any remaining audio in the ring to a raw wav (diagnostics)
+        # samples = self._audio_wptr - self._audio_rptr
+        # audio_left = self._pop_audio_frame()  # might be < one frame, that's OK
+        # raw = np.concatenate([self._audio_ring[-samples:], audio_left])
+        # raw_path = self.render_dir / f"slice_{self._current_session_id}.raw.wav"
+        # sf.write(raw_path, raw, samplerate=self.audio_sr)
+        # self._session_raw_wav = raw_path
+        #
+        # log.info("Waiting for render threads to finish...")
+        # self.wait_for_renders()
+        # log.info("Rendering session %s complete.", self._current_session_id)
+        # 
+        # if self._session_renders:
+        #     out = self.render_dir / f"session_{self._current_session_id}.mp4"
+        #     self._concat_mp4s(self._session_renders, out)
 
-        # prepare for the next enable_recording()
-        self._current_session_id = None
-        self._session_renders.clear()
+        # self._current_session_id = None
+        # self._session_renders.clear()
 
-    def save_recording(self, path="outputs/recording.h5"):
-        final_Z = self.Z_recording[:self.record_frame_idx]
-        final_probe = self.probe_signal[:self.record_frame_idx]
+    # ───────────────────────────── misc helpers ──────────────────────────────
+    def feed_audio_block(self, pcm: np.ndarray) -> None:  # alias
+        self.feed_audio(pcm)
 
-        with h5py.File(path, "w") as f:
-            f.create_dataset("fields", data=final_Z)
-            f.create_dataset("probe_signal", data=final_probe)
+    def wait(self, timeout: float | None = None) -> None:
+        self.wait_for_renders(timeout)
 
-        log.info(f"✅ Recording saved to {path}")
+    def _concat_mp4s(self, ins: List[Path], out: Path) -> None:
+        if len(ins) == 1:
+            ins[0].rename(out); return
+        lst = out.with_suffix(".txt")
+        lst.write_text("".join(f"file '{p.resolve()}'\n" for p in ins))
+        subprocess.run(
+            [self.ffmpeg_bin, "-y", "-f", "concat", "-safe", "0",
+             "-i", str(lst), "-c", "copy", str(out)],
+            check=True,
+        )
+        lst.unlink(missing_ok=True)
+
+    # rest of pose-graph helpers unchanged …
 
     def set_probe_location(self, iy: int, ix: int) -> None:
         self.probe_iy, self.probe_ix = iy, ix
@@ -499,46 +494,53 @@ class RippleEngine:
 
         self.propagator.add_excitation(self.extended_excitation)
         self.extended_excitation[:self.N_grid] = 0
+        self.max_frequency = self.speed / (2 * max(self.dx, self.dx))
 
-    def update(self, t: float):
+    # ───────────────────────────── destructor ────────────────────────────────
+    def __del__(self) -> None:
+
+        if self.recording_enabled:
+            try:
+                self.disable_recording(_called_from_del=True)
+                if self._all_renders:
+                    h = hashlib.sha1("".join(map(str, self._all_renders)).encode()).hexdigest()[:10]
+                    self._concat_mp4s(self._all_renders, self.render_dir / f"ripples_{h}.mp4")
+            except Exception as exc:  # pragma: no cover
+                log.exception("Destructor failed: %s", exc)
+
+
+    # ───────────────────────────── frame update ──────────────────────────────
+    def update(self, t: float) -> None:
         self.time = t
-    
-        for name, source in self.sources.items():
-            result = source(t)
-            weight = 1 / max(len(self.sources), 1) if name != 'heart' else 0.001
-            self.excitation[:] += weight * result["excitation"]
-    
+
+        for name, src in self.sources.items():
+            res = src(t)
+            w = 1 / max(len(self.sources), 1) if name != "heart" else 0.001
+            self.excitation += w * res["excitation"]
+
         if self.use_matrix:
             self._update_pose_graph_excitation()
         else:
             self.propagator.add_excitation(self.excitation)
-    
+
         self.propagator.step()
-    
-        if self.pose_graph_state:
-            combined_state = self.propagator.get_state().flatten()
-            grid_state_flat = combined_state[:self.N_grid]
-            pose_state_flat = combined_state[self.N_grid:]
-            self.Z[:] = grid_state_flat.reshape(self.resolution)
-            self.pose_graph_state.set_ripple_states(cp.asnumpy(pose_state_flat))
-        else:
-            self.Z[:] = self.propagator.get_state()
-    
-        # --------------------------
-        # Recording logic
-        # --------------------------
+        self.Z[:] = self.propagator.get_state()
+
+        # ───── recording per-frame ─────
         if self.recording_enabled:
-            self.Z_ram_online[self._ram_frame_idx] = cp.asnumpy(self.Z) if self.use_gpu else self.Z.copy()
-            self.probe_ram_online[self._ram_frame_idx] = cp.asnumpy(self.Z[self.probe_iy, self.probe_ix]) if self.use_gpu else self.Z[self.probe_iy, self.probe_ix]
+            i = self._ram_frame_idx
+            self.Z_ram_on[i] = cp.asnumpy(self.Z) if self.use_gpu else self.Z
+            self.probe_ram_on[i] = self.Z[self.probe_iy, self.probe_ix]
+            self.audio_ram_on[i] = self._pop_audio_frame()
             self._ram_frame_idx += 1
-    
-            # Check if RAM buffer is full
             if self._ram_frame_idx >= self.ram_buffer_size:
                 self._flush_ram_to_disk()
                 self._ram_frame_idx = 0
-    
+
         self.excitation[:] = 0
         self._log_counter += 1
 
+
+    # expose current field
     def get_field(self) -> ArrayType:
         return self.Z

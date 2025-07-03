@@ -226,10 +226,6 @@ class AudioProcessor:
             [spec.copy() for spec in self.spectrogram_buffers]
         ))
 
-        # Only optional print every few frames
-        if self.frame_counter % 50 == 0:
-            print(f"Top {self.num_top_frequencies} frequencies: {self.current_top_k_frequencies}")
-
         self.frame_counter += 1
 
     def process_pending_audio(self):
@@ -308,3 +304,14 @@ class AudioProcessor:
 
         # Stop any other resources if needed (timers etc.)
         print("AudioProcessor stopped cleanly.")
+
+    def latest_audio(self, n_samples: int | None = None) -> np.ndarray:
+        """
+        Copy the last ``n_samples`` mono-mixed samples from the rolling buffer.
+        If *n_samples* is None, returns the entire buffer (latest first).
+        """
+        #   mono mix: mean over channels
+        audio = self.audio_buffer.mean(axis=1)
+        if n_samples is None or n_samples >= len(audio):
+            return audio.copy()
+        return audio[-n_samples:].copy()

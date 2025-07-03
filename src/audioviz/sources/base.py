@@ -37,6 +37,7 @@ class ExcitationSourceBase(ABC):
         self.name = name
         self._subscribers: dict[str, list[Callable]] = {}
         self.gain: float = 1.0
+        self._log_debug = False
 
     @abstractmethod
     def __call__(self, t: float) -> Dict[str, Any]:
@@ -75,9 +76,3 @@ class ExcitationSourceBase(ABC):
     def _set_gain(self, value: float):
             self.gain = value
             self._emit("gain_changed", self.gain)
-
-            log.debug(
-                f"Gain for {self.name} set to {self.gain:.3f} "
-                f"({value}%)"
-            )
-

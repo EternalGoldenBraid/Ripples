@@ -24,6 +24,7 @@ class RippleWaveVisualizer(QtWidgets.QWidget):
                  damping: float,
                  use_gpu: bool = True):
         super().__init__()
+        self._log_debug = False
 
         self.control_panel: Optional[ControlPanel] = None
 
@@ -41,11 +42,6 @@ class RippleWaveVisualizer(QtWidgets.QWidget):
             damping=damping,
             use_gpu=use_gpu,
         )
-
-        self.timer = QtCore.QTimer()
-        self.timer.setInterval(16)  # ~60 FPS
-        self.timer.timeout.connect(self.update_visualization)
-        self.timer.start()
 
         self._init_ui()
 
@@ -88,10 +84,11 @@ class RippleWaveVisualizer(QtWidgets.QWidget):
 
         self.image_item.setImage(Z_vis, autoLevels=False)
 
-        self.log_counter_ += 1
-        if self.log_counter_ == 30:
-            log.debug(f"min: {Z_vis.min()}, max: {Z_vis.max()}, mean: {Z_vis.mean()}")
-            self.log_counter_ = 0
+        if self._log_debug:
+            self.log_counter_ += 1
+            if self.log_counter_ == 30:
+                log.debug(f"min: {Z_vis.min()}, max: {Z_vis.max()}, mean: {Z_vis.mean()}")
+                self.log_counter_ = 0
 
 
     def toggle_controls(self):

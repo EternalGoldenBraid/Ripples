@@ -188,12 +188,14 @@ class HeartVideoExcitation(ExcitationSourceBase):
         self.out[top:bottom, left:right] = self.amplitude * mask_crop
         overlay_mask = self.out > 0.0
 
-        if not hasattr(self, 'log_counter_'):
-            self.log_counter_ = 0
-        self.log_counter_ += 1
-        if self.log_counter_  == 10:
-            log.debug(f"min: {self.out.min()}, max: {self.out.max()}, mean: {self.out.mean()}")
-            self.log_counter_ = 0
+
+        if self._log_debug:
+            if not hasattr(self, 'log_counter_'):
+                self.log_counter_ = 0
+            self.log_counter_ += 1
+            if self.log_counter_  == 10:
+                log.debug(f"min: {self.out.min()}, max: {self.out.max()}, mean: {self.out.mean()}")
+                self.log_counter_ = 0
 
         # overlay_mask = self.xp.zeros_like(self.out, dtype=bool)
         # overlay_mask[top:bottom, left:right] = True

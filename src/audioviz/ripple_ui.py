@@ -74,7 +74,7 @@ class ControlPanel(QtWidgets.QWidget):
         group_layout.addWidget(record_start_btn)
         
         record_stop_btn = QtWidgets.QPushButton("Stop & Save Recording")
-        record_stop_btn.clicked.connect(lambda: (self.engine.disable_recording(), self.engine.save_recording()))
+        record_stop_btn.clicked.connect(lambda: self.engine.disable_recording())
         group_layout.addWidget(record_stop_btn)
 
         group.setLayout(group_layout)
