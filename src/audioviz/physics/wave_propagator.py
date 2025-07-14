@@ -77,81 +77,6 @@ class WavePropagatorCPU:
         self.Z_old[:] = 0
         self.Z_new[:] = 0
 
-
-class WavePropagatorGPU_old:
-    """
-    2D Damped Wave Equation Propagator (GPU version).
-
-    Implements explicit leap-frog time stepping for the damped wave equation
-    on a uniform 2D grid using a five-point finite-difference stencil.
-
-    Update formula:
-
-        Z_new = 2 * Z - Z_old + c2_dt2 * laplacian(Z)
-        Z_new *= damping
-
-    where:
-        laplacian(Z) = -4*Z + roll(Z, ±1, x) + roll(Z, ±1, y)
-        c2_dt2       = (c * dt / dx)^2
-        damping      = user-defined damping coefficient (1 − gamma * dt).
-
-    The Laplacian uses periodic boundary conditions (via np.roll).
-
-    For a complete mathematical derivation and stability analysis,
-    see: docs/wave_derivation.pdf
-
-    Parameters
-    ----------
-    shape : tuple
-        Grid shape (height, width).
-    dx : float
-        Grid spacing.
-    dt : float
-        Time step.
-    speed : float
-        Wave speed c.
-    damping : float
-        Damping factor (1.0 = no damping).
-    """
-    def __init__(self, shape, dx: float, dt: float, speed: float, damping: float):
-        self.shape = shape
-        self.dx: float = dx
-        self.dt: float = dt
-        self.c: float = speed
-        self.damping: float = damping
-
-        self.Z = cp.zeros(shape, dtype=cp.float32)
-        self.Z_old = cp.zeros_like(self.Z)
-        self.Z_new = cp.zeros_like(self.Z)
-
-        self.c2_dt2: float = (self.c * self.dt / self.dx)**2
-
-    def add_excitation(self, excitation: cp.ndarray):
-        assert excitation.shape == self.Z.shape
-        self.Z += excitation
-
-    def step(self):
-        Z = self.Z
-        laplacian = (
-            -4 * Z +
-            cp.roll(Z, 1, axis=0) + cp.roll(Z, -1, axis=0) +
-            cp.roll(Z, 1, axis=1) + cp.roll(Z, -1, axis=1)
-        )
-        # self.Z_new = (2 * Z - self.Z_old + self.c2_dt2 * laplacian) # No damping
-        self.Z_new = (2 * Z - self.Z_old + self.c2_dt2 * laplacian - (self.damping)*self.dt*(Z - self.Z_old)) # True damping
-        # self.Z_new = (2 * Z - self.Z_old + self.c2_dt2 * laplacian)*self.damping
-        self.Z_old = Z.copy()
-        self.Z = self.Z_new.copy()
-
-    def get_state(self):
-        return self.Z
-
-    def reset(self):
-        self.Z[:] = 0
-        self.Z_old[:] = 0
-        self.Z_new[:] = 0
-
-
 class WavePropagatorGPU:
     """
     2D or graph-based damped wave equation propagator (GPU version).
@@ -258,6 +183,7 @@ class WavePropagatorGPU:
             2 * self.Z - self.Z_old + self.c2_dt2 * laplacian_Z
             - (self.damping) * self.dt * (self.Z - self.Z_old)
         )
+        self.Z_new -= self.Z_new.mean()
         # self.Z_new = (2 * Z - self.Z_old + self.c2_dt2 * laplacian_Z)*self.damping
         self.Z_old = self.Z.copy()
         self.Z = self.Z_new.copy()

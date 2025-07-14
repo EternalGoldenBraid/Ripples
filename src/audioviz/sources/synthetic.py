@@ -88,15 +88,15 @@ class SyntheticPointExcitation(ExcitationSourceBase):
 
     def _set_amplitude(self, val): 
         self.amplitude = val if val < self.nominal_peak else self.nominal_peak
-        log.debug( f"Set Amplitude to {self.amplitude:.3f}")
+        # log.debug( f"Set Amplitude to {self.amplitude:.3f}")
 
     def _set_frequency(self, val): 
         self.frequency = val
-        log.debug( f"Set Frequency to {self.frequency:.3f} Hz ({val} Hz)")
+        # log.debug( f"Set Frequency to {self.frequency:.3f} Hz ({val} Hz)")
 
     def _set_decay_alpha(self, val): 
         self.decay_alpha = val
-        log.debug( f"Set Decay α to {self.decay_alpha:.3f} ({val})")
+        # log.debug( f"Set Decay α to {self.decay_alpha:.3f} ({val})")
 
     def get_controls(self):
         return [

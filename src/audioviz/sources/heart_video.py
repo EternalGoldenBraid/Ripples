@@ -89,7 +89,7 @@ class HeartVideoExcitation(ExcitationSourceBase):
                 if not ret:
                     break
                 gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY).astype(np.float32) / 255.0
-                gray = self.xp.asarray(gray, dtype=self.xp.float32)
+                gray = self.xp.asarray(gray.T, dtype=self.xp.float32)
                 gray -= gray.mean()           # centre to ~0
                 gray /= (gray.std() + 1e-6)    # optional: unit variance
                 frames_np.append(gray)
@@ -132,9 +132,9 @@ class HeartVideoExcitation(ExcitationSourceBase):
             }),
             ("amplitude", {
                 "label": "Amplitude",
-                "min": 0, "max": 50000, "init": int(self.amplitude * 100),
+                "min": 0, "max": 200, "init": int(self.amplitude * 100),
                 "tooltip": "Controls amplitude of synthetic ripple",
-                "on_change": lambda val: self.set_amplitude(val / 100.0)
+                "on_change": lambda val: self.set_amplitude(val / 1000.0)
             }),
             ("gain", {
                 "label": "Gain",
@@ -185,7 +185,7 @@ class HeartVideoExcitation(ExcitationSourceBase):
 
         # self.out[top:bottom,left:right] = mask_crop * self.amplitude
 
-        self.out[top:bottom, left:right] = self.amplitude * mask_crop
+        self.out[top:bottom, left:right] = mask_crop
         overlay_mask = self.out > 0.0
 
 
@@ -200,6 +200,10 @@ class HeartVideoExcitation(ExcitationSourceBase):
         # overlay_mask = self.xp.zeros_like(self.out, dtype=bool)
         # overlay_mask[top:bottom, left:right] = True
         return {
-            'excitation': self.out,
-                'overlay': {'mask': overlay_mask},
+            'excitation': self.amplitude * self.out,
+                'overlay': {
+                    'mask': overlay_mask, 
+                    'img': self.out[overlay_mask],
+                    'weight': self.amplitude,
+                }
         }

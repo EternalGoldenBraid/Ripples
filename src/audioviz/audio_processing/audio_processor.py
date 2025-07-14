@@ -85,7 +85,7 @@ class AudioProcessor:
 
         self.freq_bins = np.fft.rfftfreq(self.n_fft, d=1/self.sr)
 
-        self.raw_input_queue: deque[np.ndarray] = deque(maxlen=32)
+        self.raw_input_queue: deque[np.ndarray] = deque(maxlen=128)
 
         if n_mels is None:
             self.compute_spectrogram = partial(

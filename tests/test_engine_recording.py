@@ -50,7 +50,7 @@ class TestRippleEngineRecorder:
         self.engine.enable_recording()
 
         # Calculate frames to fully fill all disk buffers at least once
-        frames_to_fill_all_disks = self.engine.disk_buffer_size * self.engine.num_disk_buffers
+        frames_to_fill_all_disks = (self.engine.disk_buffer_size * self.engine.num_disk_buffers)*8
 
         for i in range(frames_to_fill_all_disks):
             self.engine.feed_audio(self.audio_chunk)

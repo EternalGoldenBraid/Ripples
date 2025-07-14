@@ -45,11 +45,12 @@ from audioviz.sources.pose.pose_graph_state import PoseGraphState
 from audioviz.types import ArrayType
 from audioviz.utils.graph_utils import build_combined_laplacian, build_grid_adjacency
 from audioviz.utils.utils import timed
+from audioviz.recorder import RecorderBase, Hdf5ChunkRecorder
 
 __all__ = ["RippleEngine"]
 
 
-class RippleEngine:
+class RippleEngine_old:
     # ─────────────────────────────── construction ───────────────────────────
     def __init__(
         self,
@@ -59,9 +60,9 @@ class RippleEngine:
         damping: float,
         *,
         use_gpu: bool = True,
-        ram_budget_gb: float = 0.2,
-        disk_budget_gb: float = 3,
-        num_disk_buffers: int = 5,
+        ram_budget_gb: float = 1.0,
+        disk_budget_gb: float = 4,
+        num_disk_buffers: int = 4,
     ) -> None:
         # ───── physics ─────
         self.resolution = resolution
@@ -72,6 +73,7 @@ class RippleEngine:
         self.xp = cp if self.use_gpu else np
         self.time: float = 0.0
         self._log_counter: int = 0
+        self._excitation_results: Dict[str, Dict[str, ArrayType]] = {}
 
         self.Z = self.xp.zeros(resolution, dtype=self.xp.float32)
         self.excitation = self.xp.zeros_like(self.Z)
@@ -108,6 +110,7 @@ class RippleEngine:
 
         atexit.register(self.__del__)
 
+        self.recording_enabled = False
         self._init_recording_config(ram_budget_gb, disk_budget_gb, num_disk_buffers)
         log.info("RippleEngine initialised.")
 
@@ -120,6 +123,7 @@ class RippleEngine:
         frames_ram = int(ram_budget_gb * 1024**3 / bytes_per_frame)
         frames_disk_raw = disk_budget_gb * 1024**3 / bytes_per_frame
         frames_disk = frames_ram * int(frames_disk_raw // frames_ram)
+        assert frames_disk > 0, "disk_buffer_size ended up zero – check RAM/DISK budgets"
 
         self.ram_buffer_size = frames_ram
         self.disk_buffer_size = frames_disk
@@ -249,6 +253,7 @@ class RippleEngine:
         with lock:
             self._disk_rendering[idx] = True
             self._disk_ready[idx] = False
+
         in_path = self._disk_paths[idx]
         out_mp4 = self.render_dir / f"render_{idx:02d}.mp4"
         H, W = self.resolution
@@ -256,34 +261,43 @@ class RippleEngine:
         log.debug("Flags updated, starting render thread for buffer %d", idx)
 
         def _render() -> None:
-            log.info("🎥 Render buffer %d → %s", idx, out_mp4)
+            """
+            Render without reading the disk buffer into RAM.
+            """
+            log.info(f"🎥 Render buffer {idx} → {out_mp4}")
 
             with timed(f"Render buffer {idx}"):
                 with h5py.File(in_path, "r") as f:
-                    fields = f["fields"][...]
+                    # fields = f["fields"][...]
                     audio = f["audio"][...].reshape(-1)  # 1-D PCM
-                wav_path = out_mp4.with_suffix(".wav")
-                sf.write(wav_path, audio, samplerate=self.audio_sr)
+                    fields = f["fields"]
 
-                cmd = [
-                    self.ffmpeg_bin, "-y",
-                    "-f", "rawvideo", "-pix_fmt", "rgb24",
-                    "-s", f"{W}x{H}", "-r", str(self.vis_fps),
-                    "-i", "-", "-i", str(wav_path),
-                    "-c:v", self.ffmpeg_codec, "-crf", str(self.ffmpeg_crf),
-                    "-pix_fmt", "yuv420p",
-                    "-c:a", "aac", "-b:a", "192k",
-                    str(out_mp4),
-                ]
-                proc = subprocess.Popen(cmd, stdin=subprocess.PIPE)
+                    wav_path = out_mp4.with_suffix(".wav")
+                    sf.write(wav_path, audio, samplerate=self.audio_sr)
+                    cmd = [
+                        self.ffmpeg_bin, "-y",
+                        "-f", "rawvideo", "-pix_fmt", "rgb24",
+                        "-s", f"{W}x{H}", "-r", str(self.vis_fps),
+                        "-i", "-", "-i", str(wav_path),
+                        "-c:v", self.ffmpeg_codec, "-crf", str(self.ffmpeg_crf),
+                        "-pix_fmt", "yuv420p",
+                        "-c:a", "aac", "-b:a", "192k",
+                        str(out_mp4),
+                    ]
+                    proc = subprocess.Popen(cmd, stdin=subprocess.PIPE)
 
-                for z in fields:
-                    norm = (z - z.min()) / (np.ptp(z) + 1e-6)
-                    rgb = (cm.inferno(norm)[:, :, :3] * 255).astype(np.uint8)
-                    proc.stdin.write(rgb.tobytes())
-                proc.stdin.close()
-                proc.wait()
-                wav_path.unlink(missing_ok=True)
+                    # for z in fields:
+                    for i in range(fields.shape[0]):
+                        z = fields[i, ...]  # get one frame
+                        norm = (z - z.min()) / (np.ptp(z) + 1e-6)
+                        rgb = (cm.inferno(norm)[:, :, :3] * 255).astype(np.uint8)
+                        proc.stdin.write(rgb.tobytes())
+                    proc.stdin.close()
+                    proc.wait()
+                    proc.wait()
+                    if proc.returncode:
+                        log.error(f"FFmpeg failed {proc.returncode} on buffer {idx}")
+                    wav_path.unlink(missing_ok=True)
 
             self._disk_rendering[idx] = False
             self._all_renders.append(out_mp4)
@@ -318,13 +332,37 @@ class RippleEngine:
                     self._disk_offsets[idx] += self.ram_buffer_size
                     if self._disk_offsets[idx] >= self.disk_buffer_size:
                         self._disk_offsets[idx] = 0
-                        self._disk_ready[idx] = True
                         self._active_disk_idx = (idx + 1) % self.num_disk_buffers
+                        self._disk_ready[idx] = True
                         log.info(f"♻️ Disk buffer {idx} full → queued")
 
         thread: Thread = Thread(target=_write, daemon=True)
         thread.start()
         return thread
+
+    def _flush_n_frames(self, n_frames: int) -> None:
+        """Write exactly *n_frames* from the on-buffer to disk (no thread)."""
+
+        if n_frames == 0:
+            return                                   # nothing to do
+
+        idx  = self._active_disk_idx
+        lock = self._disk_locks[idx]
+        off  = self._disk_offsets[idx]
+        path = self._disk_paths[idx]
+
+        with timed(f"Flush {n_frames} f → disk {idx}"):
+            with lock, h5py.File(path, "r+") as f:
+                sl = slice(off, off + n_frames)      # never overruns
+                f["fields"][sl]        = self.Z_ram_on[:n_frames]
+                f["probe_signal"][sl]  = self.probe_ram_on[:n_frames]
+                f["audio"][sl]         = self.audio_ram_on[:n_frames]
+
+        self._disk_offsets[idx] += n_frames
+        if self._disk_offsets[idx] >= self.disk_buffer_size:
+            self._disk_offsets[idx] = 0
+            self._active_disk_idx   = (idx + 1) % self.num_disk_buffers
+            self._disk_ready[idx]   = True
 
     # ───────────────────────────── public API ────────────────────────────────
     def enable_recording(self) -> None:
@@ -347,11 +385,16 @@ class RippleEngine:
 
         log.info("Stopping recording...")
 
+        # if self._ram_frame_idx:
+        #     log.info("Flushing remaining RAM frames to disk...")
+        #     last_flush_thread = self._flush_ram_to_disk()
+        #     last_flush_thread.join()  # wait for last flush to finish
+        #     log.info("RAM frames flushed to disk.")
+
         if self._ram_frame_idx:
-            log.info("Flushing remaining RAM frames to disk...")
-            last_flush_thread = self._flush_ram_to_disk()
-            last_flush_thread.join()  # wait for last flush to finish
-            log.info("RAM frames flushed to disk.")
+            log.info("Flushing remaining %d frames to disk...", self._ram_frame_idx)
+            self._flush_n_frames(self._ram_frame_idx)   # <── new
+            self._ram_frame_idx = 0
 
         log.info("Marking all non-empty disk buffers as ready...")
         for i in range(self.num_disk_buffers):
@@ -397,11 +440,18 @@ class RippleEngine:
             ins[0].rename(out); return
         lst = out.with_suffix(".txt")
         lst.write_text("".join(f"file '{p.resolve()}'\n" for p in ins))
-        subprocess.run(
-            [self.ffmpeg_bin, "-y", "-f", "concat", "-safe", "0",
-             "-i", str(lst), "-c", "copy", str(out)],
-            check=True,
-        )
+        cmd = [
+            self.ffmpeg_bin, "-y",
+            "-f", "concat", "-safe", "0",
+            "-i", str(lst),           # listfile contains  ‘file path/to/render_00.mp4’ …
+            "-c:v", self.ffmpeg_codec,     # libx264
+            "-crf", str(self.ffmpeg_crf),  # keep same quality number you already use
+            "-pix_fmt", "yuv420p",
+            "-c:a", "aac", "-b:a", "192k",
+            str(out),                  # ripples_<hash>.mp4
+        ]
+        subprocess.run(cmd, check=True)
+
         lst.unlink(missing_ok=True)
 
     # rest of pose-graph helpers unchanged …
@@ -515,7 +565,13 @@ class RippleEngine:
 
         for name, src in self.sources.items():
             res = src(t)
-            w = 1 / max(len(self.sources), 1) if name != "heart" else 0.001
+            self._excitation_results[name] = res
+            # w = 1 / max(len(self.sources), 1) if name != "heart" else 0.001
+            if name == "heart":
+                w = 0.0001
+            else:
+                w = 1 / max(len(self.sources), 1)
+
             self.excitation += w * res["excitation"]
 
         if self.use_matrix:
@@ -539,6 +595,11 @@ class RippleEngine:
 
         self.excitation[:] = 0
         self._log_counter += 1
+
+        if 'heart' in self._excitation_results:
+            return self._excitation_results['heart']['overlay']
+        else:
+            return None
 
 
     # expose current field

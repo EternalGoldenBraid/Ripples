@@ -75,12 +75,30 @@ class RippleWaveVisualizer(QtWidgets.QWidget):
 
         self.setLayout(layout)
 
+    def normalize_z(self, Z_vis):
+        """Normalize Z values to [0, 1] for visualization."""
+        z_min = Z_vis.min()
+        z_max = Z_vis.max()
+        if z_max - z_min == 0:
+            return np.zeros_like(Z_vis)
+
+        return (Z_vis - z_min) / (z_max - z_min + 1e-8)
+
     def update_visualization(self):
         self.engine.time += self.engine.dt
-        self.engine.update(self.engine.time)
+        overlay = self.engine.update(self.engine.time)
 
         Z = self.engine.get_field()
         Z_vis = cp.asnumpy(Z) if self.use_gpu else Z
+        if overlay is not None:
+            mask = cp.asnumpy(overlay['mask']) if self.use_gpu else overlay['mask']
+            img = cp.asnumpy(overlay['img']) if self.use_gpu else overlay['img']
+            alpha = overlay['weight']
+            Z_vis[mask] = (1-alpha) * Z_vis[mask] + alpha * img
+            # Z_vis[~mask] = self.normalize_z(Z_vis[~mask])
+            Z_vis = self.normalize_z(Z_vis)
+        else:
+            Z_vis = self.normalize_z(Z_vis)
 
         self.image_item.setImage(Z_vis, autoLevels=False)
 
@@ -173,7 +191,15 @@ class RippleWaveVisualizer3D(QtWidgets.QWidget):
 
         Ny, Nx = Z_vis.shape
 
-        self.surface.setData(x=self.x, y=self.y, z=Z_vis, colors=colors)
+        self.surface.setData(x=self.x, y=self.y, z=Z_vis-Z_vis.mean(), colors=colors)
+
+        qimg = self.view.grabFramebuffer()          # QImage
+        frame = qimg.constBits().asstring(qimg.byteCount())
+        rgb   = np.frombuffer(frame, np.uint8).reshape(qimg.height(), qimg.width(), 4)[:, :, :3]
+
+        if self.engine.recording_enabled:
+            self.engine.feed_video_frame(rgb)
+
 
     def toggle_controls(self):
         if self.control_panel is None:

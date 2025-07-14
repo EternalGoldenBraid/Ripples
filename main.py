@@ -23,7 +23,16 @@ import qdarkstyle
 from PyQt5 import QtCore, QtWidgets
 from matplotlib import cm
 from matplotlib.colors import Normalize
-from loguru import logger
+from loguru import logger as log
+
+# log.remove()  # Remove default stderr handler
+log.add("logs/debug_log.txt", 
+        rotation="10 MB",   # optional: rotate when file reaches 10 MB
+        retention="10 days",  # optional: keep old logs for 10 days
+        level="DEBUG",        # catch all logs including DEBUG
+        enqueue=True,         # thread-safe for multi-thread logging
+        backtrace=True,       # show detailed stack traces
+        diagnose=True)       
 
 from audioviz.audio_processing.audio_processor import AudioProcessor
 from audioviz.utils.audio_devices import select_devices
@@ -49,16 +58,21 @@ FLAGS = dict(
     show_helix=False,
     use_pose_graph=False,
 
-    # use_audio_excitation=True,
-    # use_heart_video=True,
-    # use_synthetic=True,
-
     use_audio_excitation=True,
-    use_heart_video=False,
-    use_synthetic=False,
+    use_heart_video=True,
+    use_synthetic=True,
+
+    # use_audio_excitation=True,
+    # use_heart_video=False,
+    # use_synthetic=False,
+
+    # use_audio_excitation=False,
+    # use_heart_video=False,
+    # use_synthetic=True,
 )
 
-HEART_VIDEO_PATH = Path("Data/GeneratedHearts/test_e050_p002.avi")
+# HEART_VIDEO_PATH = Path("Data/GeneratedHearts/test_e050_p002.avi")
+HEART_VIDEO_PATH = Path("Data/GeneratedHearts/test_e005_p002.avi")
 WAV_PATH         = Path("data/test.wav")
 
 # -----------------------------------------------------------------------------
@@ -69,13 +83,23 @@ N_FFT      = 256
 WINDOW_MS  = 20
 HOP_RATIO  = 1 / 4
 
-USE_3D = False # or False
+### HIGH-RES 2D Ripple
+# USE_3D = False 
+# plane_size_m = (100., 100.)
+# dx = 5e-2
+
+### Pixelated 
+# USE_3D = False 
+# plane_size_m = (0.70, 0.40)
+# dx = 2.5e-3
+
+USE_3D = True
+plane_size_m = (10., 10.)  # Size of the ripple plane in meters
+dx = 5e-2  # Pixel size in meters
 
 RIPPLE_CONF = dict(
-    plane_size_m=(50., 50.),
-    # plane_size_m=(50., 25.),
-    # plane_size_m=(100., 100.),
-    dx=5e-1,
+    plane_size_m=plane_size_m,
+    dx=dx,
     speed=10.0,
     damping=0.90,
     use_gpu=True,
@@ -260,7 +284,7 @@ def main() -> None:
 
     # ---------------------------------------------------------------- Start IO
     if not processor.start():
-        logger.error("Audio start failed.")
+        log.error("Audio start failed.")
         return
 
     signal.signal(signal.SIGINT, signal.SIG_DFL)
