@@ -87,8 +87,8 @@ class RippleWaveVisualizer(QtWidgets.QWidget):
         Z_vis = cp.asnumpy(Z) if self.use_gpu else Z
 
         ## Add uniform noise
-        noise = np.random.uniform(-0.00, 0.1, Z_vis.shape)
-        Z_vis += noise
+        # noise = np.random.uniform(-0.00, 0.1, Z_vis.shape)
+        # Z_vis += noise
 
         Z_vis -= np.mean(Z_vis)
 

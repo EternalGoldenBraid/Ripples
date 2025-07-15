@@ -82,129 +82,6 @@ class WavePropagatorCPU:
         self.Z_old[:] = 0
         self.Z_new[:] = 0
 
-
-class WavePropagatorGPU_old:
-    """
-    2D or graph-based damped wave equation propagator (GPU version).
-
-    Supports either:
-        - finite-difference stencil on a 2D grid (stencil mode), or
-        - explicit sparse Laplacian on arbitrary graphs (matrix mode).
-
-    Parameters
-    ----------
-    shape : tuple
-        Shape of the state vector. (H, W) for stencil, (N_nodes,) for matrix mode.
-    dx : float
-        Grid spacing.
-    dt : float
-        Time step.
-    speed : float
-        Wave speed c.
-    damping : float
-        Damping factor (1.0 = no damping).
-    boundary_condition : str
-        Boundary condition type. Reflective, periodic, or absorbing.
-    use_matrix : bool
-        If True, use explicit sparse Laplacian.
-    laplacian_csr : Optional[cupyx.scipy.sparse.csr_matrix]
-        Sparse Laplacian matrix for matrix mode.
-    """
-
-    def __init__(self,
-                shape: Tuple[int, ...],
-                dx: float,
-                dt: float,
-                speed: float,
-                damping: float,
-                boundary_condition: str = "reflective",
-                use_matrix: bool = False,
-                laplacian_csr: Optional[cupyx.scipy.sparse.csr_matrix] = None):
-
-        self.shape = shape
-        self.dx: float = dx
-        self.dt: float = dt
-        self.c: float = speed
-        self.damping: float = damping
-        self.use_matrix: bool = use_matrix
-
-        self.c2_dt2: float = (self.c * self.dt / self.dx)**2
-
-        if use_matrix:
-            if laplacian_csr is None:
-                raise ValueError("laplacian_csr must be provided when use_matrix=True.")
-            if len(shape) != 1:
-                raise ValueError("Shape must be 1D (N_nodes,) for matrix mode.")
-            self.L: cupyx.scipy.sparse.csr_matrix = laplacian_csr
-
-            self.step = self._step_matrix
-            self.add_excitation = self._add_excitation_matrix
-        else:
-            if len(shape) != 2:
-                raise ValueError("Shape must be 2D (H, W) for stencil mode.")
-
-            self.step = self._step_stencil
-            self.add_excitation = self._add_excitation_stencil
-
-        self.Z = cp.zeros(shape, dtype=cp.float32)
-        self.Z_old = cp.zeros_like(self.Z)
-        self.Z_new = cp.zeros_like(self.Z)
-
-    def _add_excitation_stencil(self, excitation: cp.ndarray) -> None:
-        assert excitation.shape == self.Z.shape
-        self.Z += excitation
-
-    def _add_excitation_matrix(self, excitation: cp.ndarray) -> None:
-        assert excitation.shape == self.Z.shape
-        self.Z += excitation
-
-    def _step_matrix(self) -> None:
-        laplacian_Z = -1*self.L @ self.Z
-        self.laplacian_Z = cp.asarray(laplacian_Z, dtype=cp.float32) #NOTE: for debugging
-
-        # self.Z_new = (2 * Z - self.Z_old + self.c2_dt2 * laplacian) # No damping
-        # self.Z_new = (2 * self.Z - self.Z_old + self.c2_dt2 * laplacian_Z - (self.damping)*self.dt*(self.Z - self.Z_old)) # True damping
-        # self.Z_new = (2 * Z - self.Z_old + self.c2_dt2 * laplacian)*self.damping
-
-        # self.Z_old = self.Z.copy()
-        # self.Z = self.Z_new.copy()
-        self._apply_leapfrog_update(laplacian_Z)
-
-    def _step_stencil(self) -> None:
-        laplacian_Z = (
-            -4 * self.Z +
-            cp.roll(self.Z, 1, axis=0) + cp.roll(self.Z, -1, axis=0) +
-            cp.roll(self.Z, 1, axis=1) + cp.roll(self.Z, -1, axis=1)
-        )
-
-        self.laplacian_Z = cp.asarray(laplacian_Z, dtype=cp.float32) #NOTE: for debugging
-
-
-        # # self.Z_new = (2 * Z - self.Z_old + self.c2_dt2 * laplacian) # No damping
-        # self.Z_new = (2 * self.Z - self.Z_old + self.c2_dt2 * laplacian_Z - (self.damping) * self.dt * (self.Z - self.Z_old)) # True damping
-        # # self.Z_new = (2 * Z - self.Z_old + self.c2_dt2 * laplacian)*self.damping
-        # self.Z_old = self.Z.copy()
-        # self.Z = self.Z_new.copy()
-        self._apply_leapfrog_update(laplacian_Z)
-
-    def _apply_leapfrog_update(self, laplacian_Z: cp.ndarray) -> None:
-        self.Z_new = (
-            2 * self.Z - self.Z_old + self.c2_dt2 * laplacian_Z
-            - (self.damping) * self.dt * (self.Z - self.Z_old)
-        )
-        # self.Z_new = (2 * Z - self.Z_old + self.c2_dt2 * laplacian_Z)*self.damping
-        self.Z_old = self.Z.copy()
-        self.Z = self.Z_new.copy()
-
-
-    def get_state(self) -> cp.ndarray:
-        return self.Z
-
-    def reset(self) -> None:
-        self.Z[:] = 0
-        self.Z_old[:] = 0
-        self.Z_new[:] = 0
-
 class WavePropagatorGPU:
     """
     2D or graph-based damped wave equation propagator (GPU version).
@@ -232,7 +109,7 @@ class WavePropagatorGPU:
                  dt: float,
                  speed: float,
                  damping: float,
-                 use_matrix: bool = False,
+                 use_matrix: bool = True,
                  pose_graph_state: Optional[Any] = None):
     
         self.shape = shape
@@ -277,7 +154,26 @@ class WavePropagatorGPU:
             D = coo_matrix((degrees, (np.arange(N_grid), np.arange(N_grid))), shape=(N_grid, N_grid))
     
             # --- Compute Laplacian ---
-            L_coo = D - grid_adj
+            wall_mask = np.zeros(shape, dtype=bool)
+            # Wall max a circle of ones in the center of the grid
+            radius = min(shape) // 4  # Example radius
+            center = (shape[0] // 2, shape[1] // 2)
+            # Set to ones on the perimeter of the circle not on the inside
+            for i in range(shape[0]):
+                for j in range(shape[1]):
+                    if (i - center[0])**2 + (j - center[1])**2 <= radius**2:
+                        wall_mask[i, j] = True
+
+
+            from audioviz.utils.graph_utils import apply_boundary_conditions
+            L_coo = apply_boundary_conditions(
+                    adj=grid_adj, shape=shape,
+                    mask=wall_mask, 
+                    # bc_type="neumann"
+                    bc_type="dirichlet",
+                    reflection_R=0.5,  # Example reflection ratio
+            )
+            # L_coo = D - grid_adj
             log.info("✅ Grid Laplacian (circular BC) constructed.")
     
         # --- Convert to CSR and move to GPU ---
