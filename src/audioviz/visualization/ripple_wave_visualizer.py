@@ -86,6 +86,13 @@ class RippleWaveVisualizer(QtWidgets.QWidget):
         Z = self.engine.get_field()
         Z_vis = cp.asnumpy(Z) if self.use_gpu else Z
 
+        ## Add uniform noise
+        noise = np.random.uniform(-0.00, 0.1, Z_vis.shape)
+        Z_vis += noise
+
+        Z_vis -= np.mean(Z_vis)
+
+
         self.image_item.setImage(Z_vis, autoLevels=False)
 
         self.log_counter_ += 1
@@ -172,6 +179,7 @@ class RippleWaveVisualizer3D(QtWidgets.QWidget):
 
         Z = self.engine.get_field()
         Z_vis = cp.asnumpy(Z) if self.use_gpu else Z
+        Z_vis -= np.mean(Z_vis)
         colors = self.get_colors(Z_vis)
 
         Ny, Nx = Z_vis.shape
