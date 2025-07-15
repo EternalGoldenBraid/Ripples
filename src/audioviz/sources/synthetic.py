@@ -77,13 +77,6 @@ class SyntheticPointExcitation(ExcitationSourceBase):
         mask = r_m <= propagation_limit
         ripple *= mask
 
-        # if not hasattr(self, 'log_counter_'):
-        #     self.log_counter_ = 0
-        # self.log_counter_ += 1
-        # if self.log_counter_  == 10:
-        #     log.debug(f"min: {ripple.min()}, max: {ripple.max()}, mean: {ripple.mean()}")
-        #     self.log_counter_ = 0
-
         return {'excitation': ripple}
 
     def _set_amplitude(self, val): 

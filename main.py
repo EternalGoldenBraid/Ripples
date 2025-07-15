@@ -49,13 +49,13 @@ FLAGS = dict(
     show_helix=False,
     use_pose_graph=False,
 
-    use_audio_excitation=True,
-    use_heart_video=True,
-    use_synthetic=True,
-
     # use_audio_excitation=True,
-    # use_heart_video=False,
+    # use_heart_video=True,
     # use_synthetic=True,
+
+    use_audio_excitation=True,
+    use_heart_video=False,
+    use_synthetic=True,
 )
 
 HEART_VIDEO_PATH = Path("Data/GeneratedHearts/test_e050_p002.avi")
@@ -70,11 +70,14 @@ WINDOW_MS  = 20
 HOP_RATIO  = 1 / 4
 
 USE_3D = True  # or False
+# USE_3D = False
 
 RIPPLE_CONF = dict(
-    plane_size_m=(50., 50.),
-    # plane_size_m=(50., 25.),
+    # plane_size_m=(150., 150.),
     # plane_size_m=(100., 100.),
+    plane_size_m=(50., 50.),
+    # plane_size_m=(100., 100.),
+    # dx=1e-1,
     dx=5e-2,
     speed=10.0,
     damping=0.90,

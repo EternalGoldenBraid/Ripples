@@ -1,9 +1,14 @@
 from typing import Optional, Tuple, Dict, Any
 
+
+
 import numpy as np
 import cupy as cp
 import cupyx
 from loguru import logger as log
+from scipy.sparse import coo_matrix
+
+from audioviz.utils.graph_utils import build_grid_adjacency
 
 class WavePropagatorCPU:
     """
@@ -80,80 +85,6 @@ class WavePropagatorCPU:
 
 class WavePropagatorGPU_old:
     """
-    2D Damped Wave Equation Propagator (GPU version).
-
-    Implements explicit leap-frog time stepping for the damped wave equation
-    on a uniform 2D grid using a five-point finite-difference stencil.
-
-    Update formula:
-
-        Z_new = 2 * Z - Z_old + c2_dt2 * laplacian(Z)
-        Z_new *= damping
-
-    where:
-        laplacian(Z) = -4*Z + roll(Z, ±1, x) + roll(Z, ±1, y)
-        c2_dt2       = (c * dt / dx)^2
-        damping      = user-defined damping coefficient (1 − gamma * dt).
-
-    The Laplacian uses periodic boundary conditions (via np.roll).
-
-    For a complete mathematical derivation and stability analysis,
-    see: docs/wave_derivation.pdf
-
-    Parameters
-    ----------
-    shape : tuple
-        Grid shape (height, width).
-    dx : float
-        Grid spacing.
-    dt : float
-        Time step.
-    speed : float
-        Wave speed c.
-    damping : float
-        Damping factor (1.0 = no damping).
-    """
-    def __init__(self, shape, dx: float, dt: float, speed: float, damping: float):
-        self.shape = shape
-        self.dx: float = dx
-        self.dt: float = dt
-        self.c: float = speed
-        self.damping: float = damping
-
-        self.Z = cp.zeros(shape, dtype=cp.float32)
-        self.Z_old = cp.zeros_like(self.Z)
-        self.Z_new = cp.zeros_like(self.Z)
-
-        self.c2_dt2: float = (self.c * self.dt / self.dx)**2
-
-    def add_excitation(self, excitation: cp.ndarray):
-        assert excitation.shape == self.Z.shape
-        self.Z += excitation
-
-    def step(self):
-        Z = self.Z
-        laplacian = (
-            -4 * Z +
-            cp.roll(Z, 1, axis=0) + cp.roll(Z, -1, axis=0) +
-            cp.roll(Z, 1, axis=1) + cp.roll(Z, -1, axis=1)
-        )
-        # self.Z_new = (2 * Z - self.Z_old + self.c2_dt2 * laplacian) # No damping
-        self.Z_new = (2 * Z - self.Z_old + self.c2_dt2 * laplacian - (self.damping)*self.dt*(Z - self.Z_old)) # True damping
-        # self.Z_new = (2 * Z - self.Z_old + self.c2_dt2 * laplacian)*self.damping
-        self.Z_old = Z.copy()
-        self.Z = self.Z_new.copy()
-
-    def get_state(self):
-        return self.Z
-
-    def reset(self):
-        self.Z[:] = 0
-        self.Z_old[:] = 0
-        self.Z_new[:] = 0
-
-
-class WavePropagatorGPU:
-    """
     2D or graph-based damped wave equation propagator (GPU version).
 
     Supports either:
@@ -172,6 +103,8 @@ class WavePropagatorGPU:
         Wave speed c.
     damping : float
         Damping factor (1.0 = no damping).
+    boundary_condition : str
+        Boundary condition type. Reflective, periodic, or absorbing.
     use_matrix : bool
         If True, use explicit sparse Laplacian.
     laplacian_csr : Optional[cupyx.scipy.sparse.csr_matrix]
@@ -179,13 +112,14 @@ class WavePropagatorGPU:
     """
 
     def __init__(self,
-                 shape: Tuple[int, ...],
-                 dx: float,
-                 dt: float,
-                 speed: float,
-                 damping: float,
-                 use_matrix: bool = False,
-                 laplacian_csr: Optional[cupyx.scipy.sparse.csr_matrix] = None):
+                shape: Tuple[int, ...],
+                dx: float,
+                dt: float,
+                speed: float,
+                damping: float,
+                boundary_condition: str = "reflective",
+                use_matrix: bool = False,
+                laplacian_csr: Optional[cupyx.scipy.sparse.csr_matrix] = None):
 
         self.shape = shape
         self.dx: float = dx
@@ -262,6 +196,132 @@ class WavePropagatorGPU:
         self.Z_old = self.Z.copy()
         self.Z = self.Z_new.copy()
 
+
+    def get_state(self) -> cp.ndarray:
+        return self.Z
+
+    def reset(self) -> None:
+        self.Z[:] = 0
+        self.Z_old[:] = 0
+        self.Z_new[:] = 0
+
+class WavePropagatorGPU:
+    """
+    2D or graph-based damped wave equation propagator (GPU version).
+
+    Parameters
+    ----------
+    shape : tuple
+        Grid shape or (N_nodes,) if using graph Laplacian.
+    dx : float
+        Grid spacing.
+    dt : float
+        Time step.
+    speed : float
+        Wave speed c.
+    damping : float
+        Damping factor (1.0 = no damping).
+    use_matrix : bool
+        If True, build and use graph Laplacian internally.
+    pose_graph_state : Optional[Any]
+        Optional pose graph state object to combine with grid adjacency.
+    """
+    def __init__(self,
+                 shape: Tuple[int, ...],
+                 dx: float,
+                 dt: float,
+                 speed: float,
+                 damping: float,
+                 use_matrix: bool = False,
+                 pose_graph_state: Optional[Any] = None):
+    
+        self.shape = shape
+        self.dx = dx
+        self.dt = dt
+        self.c = speed
+        self.damping = damping
+        self.use_matrix = use_matrix
+        self.pose_graph_state = pose_graph_state
+    
+        self.c2_dt2: float = (self.c * self.dt / self.dx)**2
+    
+        if use_matrix:
+            self._init_matrix(shape, pose_graph_state)
+        else:
+            if len(shape) != 2:
+                raise ValueError("Shape must be 2D (H, W) for stencil mode.")
+            self.step = self._step_stencil
+            self.add_excitation = self._add_excitation_stencil
+    
+        self.Z = cp.zeros(self.shape, dtype=cp.float32)
+        self.Z_old = cp.zeros_like(self.Z)
+        self.Z_new = cp.zeros_like(self.Z)
+
+    def _init_matrix(self,
+                     shape: Tuple[int, ...],
+                     pose_graph_state: Optional[Any] = None):
+    
+        log.info("Building internal Laplacian matrix...")
+    
+        N_grid = shape[0] * shape[1] if len(shape) == 2 else shape[0]
+    
+        grid_adj = build_grid_adjacency(shape)
+    
+        if pose_graph_state:
+            raise NotImplementedError("Pose graph state integration not implemented yet.")
+            # --- Future: pose graph logic here ---
+    
+        else:
+            # --- Compute degree matrix ---
+            degrees = np.array(grid_adj.sum(axis=1)).flatten()
+            D = coo_matrix((degrees, (np.arange(N_grid), np.arange(N_grid))), shape=(N_grid, N_grid))
+    
+            # --- Compute Laplacian ---
+            L_coo = D - grid_adj
+            log.info("✅ Grid Laplacian (circular BC) constructed.")
+    
+        # --- Convert to CSR and move to GPU ---
+        L_csr = L_coo.tocsr()
+        self.L = cupyx.scipy.sparse.csr_matrix(L_csr)
+    
+        self.extended_excitation: cp.ndarray = cp.zeros(self.shape, dtype=cp.float32)
+        self.step = self._step_matrix
+        self.add_excitation = self._add_excitation_matrix
+
+    def _add_excitation_stencil(self, excitation: cp.ndarray) -> None:
+        assert excitation.shape == self.Z.shape, \
+            f"Excitation shape {excitation.shape} does not match state shape {self.Z.shape}."
+        self.Z += excitation
+
+    def _add_excitation_matrix(self, excitation: cp.ndarray) -> None:
+        # If excitation shape matches self.shape, fine
+        if excitation.shape == self.Z.shape:
+            self.Z += excitation
+        # If excitation is 2D and matches grid shape, reshape
+        elif len(excitation.shape) == 2 and np.prod(excitation.shape).item() == self.Z.size:
+            self.Z += excitation.ravel()
+        else:
+            raise ValueError(
+                f"Excitation shape {excitation.shape} is incompatible with internal state shape {self.Z.shape}"
+            )
+
+    def _step_matrix(self) -> None:
+        self._apply_leapfrog_update((-1 * self.L @ self.Z.ravel()).reshape(self.shape))
+
+    def _step_stencil(self) -> None:
+        self._apply_leapfrog_update(
+            -4 * self.Z +
+            cp.roll(self.Z, 1, axis=0) + cp.roll(self.Z, -1, axis=0) +
+            cp.roll(self.Z, 1, axis=1) + cp.roll(self.Z, -1, axis=1)
+        )
+
+    def _apply_leapfrog_update(self, laplacian_Z: cp.ndarray) -> None:
+        self.Z_new = (
+            2 * self.Z - self.Z_old + self.c2_dt2 * laplacian_Z
+            - (self.damping) * self.dt * (self.Z - self.Z_old)
+        )
+        self.Z_old = self.Z.copy()
+        self.Z = self.Z_new.copy()
 
     def get_state(self) -> cp.ndarray:
         return self.Z

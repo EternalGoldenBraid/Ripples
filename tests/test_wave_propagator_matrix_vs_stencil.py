@@ -1,115 +1,111 @@
 import numpy as np
 import cupy as cp
-import cupyx
-from scipy.sparse import coo_matrix
+import time
 import matplotlib.pyplot as plt
 plt.style.use('dark_background')
 
 from audioviz.physics.wave_propagator import WavePropagatorGPU
-from audioviz.utils.graph_utils import build_grid_adjacency
 
-def test_plot_wave_propagator_matrix_vs_stencil():
-    shape = (5, 5)
-    N_grid = shape[0] * shape[1]
+class WavePropagatorTestSuite:
+    def __init__(self, shape=(128, 128), steps=50, dx=5e-3, dt=5e-6, speed=10.0, damping=0.99):
+        self.shape = shape
+        self.N_grid = shape[0] * shape[1]
+        self.steps = steps
+        self.dx = dx
+        self.dt = dt
+        self.speed = speed
+        self.damping = damping
 
-    dx = 5e-3
-    dt = 5e-6
-    speed = 10.0
-    damping = 0.99
+        # Sanity check
+        cfl = speed * dt / dx
+        assert cfl < 1 / np.sqrt(2), f"CFL condition not satisfied (cfl={cfl:.3f})"
 
-    cfl = speed * dt / dx
-    assert cfl < 1/np.sqrt(2), "CFL condition not satisfied! Adjust dt or dx."
+    def _create_propagators(self):
+        # Stencil
+        prop_stencil = WavePropagatorGPU(
+            shape=self.shape,
+            dx=self.dx,
+            dt=self.dt,
+            speed=self.speed,
+            damping=self.damping,
+            use_matrix=False,
+        )
 
-    # ---------------- Stencil propagator
-    prop_stencil = WavePropagatorGPU(
-        shape=shape,
-        dx=dx,
-        dt=dt,
-        speed=speed,
-        damping=damping,
-        use_matrix=False,
-    )
+        # Matrix
+        prop_matrix = WavePropagatorGPU(
+            shape=self.shape,
+            dx=self.dx,
+            dt=self.dt,
+            speed=self.speed,
+            damping=self.damping,
+            use_matrix=True,
+        )
 
-    # ---------------- Matrix propagator
-    grid_adj = build_grid_adjacency(shape)
-    degrees = np.array(grid_adj.sum(axis=1)).flatten()
-    D = coo_matrix((degrees, (np.arange(grid_adj.shape[0]), np.arange(grid_adj.shape[0]))), shape=grid_adj.shape)
-    L_coo = (D - grid_adj)
-    L_csr = L_coo.tocsr()
-    L_csr_gpu = cupyx.scipy.sparse.csr_matrix(L_csr)
+        return prop_stencil, prop_matrix
 
-    prop_matrix = WavePropagatorGPU(
-        shape=(N_grid,),
-        dx=dx,
-        dt=dt,
-        speed=speed,
-        damping=damping,
-        use_matrix=True,
-        laplacian_csr=L_csr_gpu,
-    )
+    def test_correctness(self, plot=False):
+        prop_stencil, prop_matrix = self._create_propagators()
 
-    # ---------------- Same initial state
-    init_exc = cp.zeros(shape, dtype=cp.float32)
-    init_exc[shape[0]//2, shape[1]//2] = 1.0  # small impulse
+        init_exc = cp.zeros(self.shape, dtype=cp.float32)
+        init_exc[self.shape[0] // 2, self.shape[1] // 2] = 1.0
 
-    prop_stencil.add_excitation(init_exc)
+        prop_stencil.add_excitation(init_exc)
+        prop_matrix.add_excitation(init_exc)
 
-    flat_exc = init_exc.ravel()
-    prop_matrix.add_excitation(flat_exc)
+        diff_norms = []
 
-    diff_norms = []
+        for step in range(self.steps):
+            prop_stencil.step()
+            prop_matrix.step()
 
-    steps = 50
-    for step in range(steps):
-        prop_stencil.step()
-        prop_matrix.step()
+            Z_s = cp.asnumpy(prop_stencil.get_state())
+            Z_m = cp.asnumpy(prop_matrix.get_state())
 
-        # --- Capture states
-        Z_stencil = cp.asnumpy(prop_stencil.get_state())
-        Z_matrix = cp.asnumpy(prop_matrix.get_state()).reshape(shape)
+            diff_norm = np.linalg.norm(Z_s - Z_m)
+            diff_norms.append(diff_norm)
 
-        lap_stencil = cp.asnumpy(prop_stencil.laplacian_Z)
-        lap_matrix = cp.asnumpy(prop_matrix.laplacian_Z).reshape(shape)
+            print(f"Step {step:02d} | Diff norm: {diff_norm:.3e}")
 
-        diff_norm = np.linalg.norm(Z_stencil - Z_matrix)
-        diff_norms.append(diff_norm)
+        if plot:
+            plt.plot(diff_norms, label="Stencil vs Matrix Diff Norm")
+            plt.xlabel("Step")
+            plt.ylabel("Norm")
+            plt.yscale("log")
+            plt.legend()
+            plt.show()
 
-        print(f"Step {step:02d} | Diff norm: {diff_norm:.3e}")
+    def benchmark(self):
+        prop_stencil, prop_matrix = self._create_propagators()
 
-    # --- Final Laplacians
-    fig3, axs3 = plt.subplots(1, 3, figsize=(15, 5))
+        init_exc = cp.zeros(self.shape, dtype=cp.float32)
+        init_exc[self.shape[0] // 2, self.shape[1] // 2] = 1.0
 
-    vlim = max(np.abs(lap_stencil).max(), np.abs(lap_matrix).max(), 1e-6)
+        prop_stencil.add_excitation(init_exc)
+        prop_matrix.add_excitation(init_exc)
 
-    im0 = axs3[0].imshow(lap_stencil, cmap="seismic", vmin=-vlim, vmax=vlim)
-    axs3[0].set_title("Stencil Laplacian")
-    plt.colorbar(im0, ax=axs3[0])
+        # --- Stencil timing
+        start_s = time.time()
+        for _ in range(self.steps):
+            prop_stencil.step()
+        duration_s = time.time() - start_s
 
-    im1 = axs3[1].imshow(lap_matrix, cmap="seismic", vmin=-vlim, vmax=vlim)
-    axs3[1].set_title("Matrix Laplacian")
-    plt.colorbar(im1, ax=axs3[1])
+        # --- Matrix timing
+        start_m = time.time()
+        for _ in range(self.steps):
+            prop_matrix.step()
+        duration_m = time.time() - start_m
 
-    im2 = axs3[2].imshow(lap_stencil - lap_matrix, cmap="seismic")
-    axs3[2].set_title("Laplacian Difference")
-    plt.colorbar(im2, ax=axs3[2])
-
-    plt.tight_layout()
-    plt.show()
-
-    # --- Final state fields
-    fig2, axs2 = plt.subplots(1, 2, figsize=(12, 5))
-
-    im0 = axs2[0].imshow(Z_stencil, cmap="seismic", vmin=-1, vmax=1)
-    axs2[0].set_title("Stencil Final")
-    plt.colorbar(im0, ax=axs2[0])
-
-    im1 = axs2[1].imshow(Z_matrix, cmap="seismic", vmin=-1, vmax=1)
-    axs2[1].set_title("Matrix Final")
-    plt.colorbar(im1, ax=axs2[1])
-
-    plt.tight_layout()
-    plt.show()
-
+        print(f"Stencil total time: {duration_s:.4f} s ({duration_s / self.steps:.6f} s/step)")
+        print(f"Matrix total time:  {duration_m:.4f} s ({duration_m / self.steps:.6f} s/step)")
 
 if __name__ == "__main__":
-    test_plot_wave_propagator_matrix_vs_stencil()
+    suite = WavePropagatorTestSuite(shape=(128, 128), steps=50, dx=5e-3, dt=5e-6, speed=10.0, damping=0.99)
+    suite.test_correctness(plot=True)
+
+    suite = WavePropagatorTestSuite(
+        shape=(1024, 1024),
+        steps=50,
+        dx=5e-3, dt=5e-6,
+        speed=10.0, damping=0.99
+    )
+    suite.benchmark()
