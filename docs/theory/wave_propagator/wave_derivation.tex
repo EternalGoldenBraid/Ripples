@@ -108,6 +108,20 @@ c2\_dt2 &= \left(\frac{c \Delta t}{\Delta x}\right)^2.
 \frac{c \Delta t}{\Delta x} \le \frac{1}{\sqrt{2}}.
 \end{equation}
 
+\section*{Boundary Conditions}
+
+At domain boundaries, we must define how to handle points beyond the physical grid.
+
+\begin{itemize}
+    \item \textbf{Periodic (wrap-around):} The domain connects back onto itself, so the value at the left edge equals the value at the right edge. Waves passing through one side reappear on the opposite side.
+    
+    \item \textbf{Dirichlet (fixed value):} Boundary points are set to a constant value (commonly zero). Physically, this acts as a rigid, immovable wall — a "clamped" condition. Waves are completely absorbed at the edge.
+
+    \item \textbf{Neumann (reflective):} The first spatial derivative normal to the boundary is set to zero, meaning there is no flux across the boundary. Discretely, this is implemented by mirroring the first interior point (ghost cell method), which causes the wave to reflect perfectly without inversion.
+\end{itemize}
+
+When using finite differences, the chosen boundary condition modifies how "neighbor" values beyond the grid are defined in the Laplacian stencil.
+
 \section*{Graph Laplacian Viewpoint}
 
 The discrete Laplacian matrix \(L\) on a regular 2D grid with 4-connected neighbours corresponds to
