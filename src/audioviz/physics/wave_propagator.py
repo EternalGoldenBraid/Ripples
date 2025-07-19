@@ -6,7 +6,7 @@ import numpy as np
 import cupy as cp
 import cupyx
 from loguru import logger as log
-from scipy.sparse import coo_matrix
+from scipy.sparse import coo_matrix, csr_matrix, diags
 
 from audioviz.utils.graph_utils import (
         build_grid_adjacency, apply_boundary_conditions
@@ -121,23 +121,14 @@ class WavePropagatorGPU:
         self.damping = damping
         self.use_matrix = use_matrix
         self.pose_graph_state = pose_graph_state
+
     
         self.c2_dt2: float = (self.c * self.dt / self.dx)**2
     
         if use_matrix:
-
-            # mask = np.zeros(shape, dtype=bool)
-            # # Wall max a circle of ones in the center of the grid
-            # radius = min(shape) // 4  # Example radius
-            # center = (shape[0] // 2, shape[1] // 2)
-            # # Set to ones on the perimeter of the circle not on the inside
-            # for i in range(shape[0]):
-            #     for j in range(shape[1]):
-            #         if (i - center[0])**2 + (j - center[1])**2 <= radius**2:
-            #             mask[i, j] = True
-            self._init_matrix(shape=shape, pose_graph_state=pose_graph_state,
-                              # mask=mask
-                              )
+            self._init_matrix(shape=shape, pose_graph_state=pose_graph_state)
+            self.laplacians: Optional[Dict[str, csr_matrix]] = {'default': self.L}
+            self.current_laplacian_id: str = 'default'
         else:
             if len(shape) != 2:
                 raise ValueError("Shape must be 2D (H, W) for stencil mode.")
@@ -148,17 +139,41 @@ class WavePropagatorGPU:
         self.Z_old = cp.zeros_like(self.Z)
         self.Z_new = cp.zeros_like(self.Z)
         
-    def update_boundary_mask(self, mask: np.ndarray):
+    def add_boundary(self, mask: np.ndarray, boundary_id: str):
         """
-        Updates the internal Laplacian using a new boundary mask.
-        
-        Parameters:
-        -----------
-        mask : np.ndarray
-            Boolean array (H, W) where True indicates wall/boundary.
+        Precomputes and stores a Laplacian for a given boundary mask.
+        Also sets it as the current Laplacian.
         """
-        assert mask.shape == self.shape, f"Mask shape {mask.shape} must match simulation shape {self.shape}."
-        self._init_matrix(self.shape, mask=mask)
+        assert mask.shape == self.shape, f"Boundary mask shape {mask.shape} must match simulation shape {self.shape}."
+    
+        log.info(f"🛠️  Precomputing Laplacian for boundary_id='{boundary_id}'...")
+    
+        L_coo = apply_boundary_conditions(
+            adj=build_grid_adjacency(self.shape),
+            shape=self.shape,
+            mask=mask,
+            bc_type="dirichlet",
+            reflection_R=0.5,
+        )
+        L_csr = cupyx.scipy.sparse.csr_matrix(L_coo.tocsr())
+        self.laplacians[boundary_id] = L_csr
+    
+        # Activate it
+        self.L = L_csr
+        self.current_laplacian_id = boundary_id
+    
+        log.info(f"✅ Stored and activated boundary '{boundary_id}'.")
+    
+    def set_boundary(self, boundary_id: str):
+        """
+        Sets the active Laplacian to a previously stored one.
+        """
+        if boundary_id not in self.laplacians:
+            raise KeyError(f"Laplacian with ID '{boundary_id}' not found.")
+    
+        self.L = self.laplacians[boundary_id]
+        self.current_laplacian_id = boundary_id
+        log.info(f"🔁 Switched to boundary '{boundary_id}'.")
 
 
     def _init_matrix(self,

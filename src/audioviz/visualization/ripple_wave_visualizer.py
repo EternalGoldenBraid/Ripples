@@ -128,23 +128,22 @@ class RippleWaveVisualizer(QtWidgets.QWidget):
 
     def update_visualization(self):
         self.engine.time += self.engine.dt
-        self.engine.update(self.engine.time)
-
+        overlay, alpha = self.engine.update(self.engine.time)
         Z = self.engine.get_field()
+
         Z_vis = cp.asnumpy(Z) if self.use_gpu else Z
         Z_vis = Z_vis - np.mean(Z_vis)
+        Z_vis = (1-alpha) * Z_vis + alpha * cp.asnumpy(overlay)
+        self.image_item.setImage(Z_vis, autoLevels=False)
 
-        ## Add uniform noise
-        # noise = np.random.uniform(-0.00, 0.1, Z_vis.shape)
-        # Z_vis += noise
 
         # Z_vis= self.adaptive_normalize(Z=cp.asnumpy(Z) if self.use_gpu else Z,
         #             alpha=self.alpha, log_scale=False
         # )
-
-
+        # alpha = 0.5
+        # Z_vis = (1-alpha) * Z_vis + alpha * cp.asnumpy(overlay)
         # self.image_item.setImage(Z_vis, levels=(-1,1))
-        self.image_item.setImage(Z_vis, autoLevels=False)
+
 
         self.log_counter_ += 1
         if self.log_counter_ == 30:

@@ -24,7 +24,6 @@ opencv = "*"
 qdarkstyle = "*"
 python = "3.11.*"
 
-
 [pypi-dependencies]
 audioviz = { path = ".", editable = true }
 mediapipe = ">=0.10.14, <0.11"

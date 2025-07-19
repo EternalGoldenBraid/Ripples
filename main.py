@@ -44,6 +44,7 @@ from audioviz.sources.synthetic import SyntheticPointExcitation
 # -----------------------------------------------------------------------------
 RUN_MODE = "live"        # "live" | "wav" | "headless"
 FLAGS = dict(
+    # show_spectrogram=True,
     show_spectrogram=False,
     show_ripples=True,
     show_helix=False,
@@ -59,7 +60,11 @@ FLAGS = dict(
 )
 
 # HEART_VIDEO_PATH = Path("Data/GeneratedHearts/test_e050_p002.avi")
-HEART_VIDEO_PATH = Path("Data/RippleHearts/vids/test_e400_p002.avi")
+person_id: str = "002"
+# epoch_id: str = "400"
+epoch_id: str = "005"
+HEART_VIDEO_PATH = Path(f"Data/RippleHearts/vids/test_e{epoch_id}_p{person_id}.avi")
+HEART_ECG_PATH = Path(f"Data/RippleHearts/ecg_{person_id}.npy")
 WAV_PATH         = Path("data/test.wav")
 
 # -----------------------------------------------------------------------------
