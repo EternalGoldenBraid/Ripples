@@ -2,9 +2,8 @@ from typing import Optional, Union, Tuple, Dict, List, Callable, Union
 
 from audioviz.sources.base import ExcitationSourceBase
 import numpy as np
-import cupy as cp
 from loguru import logger as log
-
+from audioviz.types import ArrayType
 CONTROLS_TYPE = List[Dict[str, Dict[str, Union[str, int, float, Callable]]]]
 
 class SyntheticPointExcitation(ExcitationSourceBase):
@@ -63,7 +62,7 @@ class SyntheticPointExcitation(ExcitationSourceBase):
             self.xp.arange(resolution[0])
         )
 
-    def __call__(self, t: float) -> Dict[str, Union[np.ndarray, cp.ndarray]]:
+    def __call__(self, t: float) -> Dict[str, ArrayType]:
         x0, y0 = self.position
         r_pix = self.xp.sqrt((self.xs - x0)**2 + (self.ys - y0)**2)
         r_m = r_pix * self.dx

@@ -1,13 +1,12 @@
 from typing import List, Tuple, Union, Optional, Dict
 
 import numpy as np
-import cupy as cp
 from loguru import logger as log
 
 from .base import ExcitationSourceBase
 from audioviz.audio_processing.audio_processor import AudioProcessor
 from audioviz.utils.signal_processing import map_audio_freq_to_visual_freq
-
+from audioviz.types import ArrayType
 class AudioExcitation(ExcitationSourceBase):
     """
     Generates ripple excitations based on top-K dominant audio frequencies.
@@ -41,7 +40,7 @@ class AudioExcitation(ExcitationSourceBase):
                  position: Tuple[float, float],
                  max_frequency: float, gain: float, dx: float,
                  speed:float, resolution: Tuple[int, int],
-                 backend: Union[np.ndarray, cp.ndarray],
+                 backend: ArrayType,
                  decay_alpha: float = 0.0,
                  name: str = "Audio Excitation",
                  audio_processor_chl_idxs: Union[List[int], int] = -1 # All channels
@@ -86,7 +85,7 @@ class AudioExcitation(ExcitationSourceBase):
         self.name: str = name
 
     def __call__(self, t: float, chl_idx: int = 0
-                 ) -> Dict[str, Union[np.ndarray, cp.ndarray]]:
+                 ) -> Dict[str, ArrayType]:
         """
         Note:
             I think chl_idx == 0 is the microphone with scarlet studio.

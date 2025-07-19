@@ -1,15 +1,14 @@
 from typing import Optional, Dict, Tuple, Union, Any
 import numpy as np
-import cupy as cp
-import cupyx
 from scipy.sparse import coo_matrix
 from loguru import logger as log
 
-from audioviz.physics.wave_propagator import WavePropagatorGPU, WavePropagatorCPU
 from audioviz.sources.base import ExcitationSourceBase
-from audioviz.sources.camera import CameraSource
-from audioviz.sources.pose.mediapipe_pose_source import MediaPipePoseExtractor
-from audioviz.sources.pose.pose_graph_state import PoseGraphState
+#from audioviz.sources.camera import CameraSource
+#from audioviz.sources.pose.mediapipe_pose_source import MediaPipePoseExtractor
+#from audioviz.sources.pose.pose_graph_state import PoseGraphState
+
+from audioviz.types import ArrayType
 
 class RippleEngine:
     def __init__(self,
@@ -30,7 +29,11 @@ class RippleEngine:
         self.pose_graph_state = pose_graph_state
 
         self.max_frequency = self.speed / (2 * max(self.dx, self.dx))
-        self.xp = cp if use_gpu else np
+        if use_gpu:
+            import cupy as cp
+            self.xp = cp
+        else:
+            self.xp = np
 
         self.Z = self.xp.zeros(self.resolution, dtype=self.xp.float32)
         self.excitation = self.xp.zeros(self.resolution, dtype=self.xp.float32)
@@ -47,8 +50,14 @@ class RippleEngine:
             "use_matrix": self.use_matrix,
             "pose_graph_state": self.pose_graph_state,
         }
-
-        self.propagator = WavePropagatorGPU(**self.propagator_kwargs)
+       
+        if use_gpu:
+            from audioviz.physics.wave_propagator import WavePropagatorGPU
+            import pdb; pdb.set_trace() 
+            self.propagator = WavePropagatorGPU(**self.propagator_kwargs)
+        else:
+            from audioviz.physics.wave_propagator import WavePropagatorCPU
+            self.propagator = WavePropagatorCPU(**self.propagator_kwargs)
 
         self.sources: Dict[str, ExcitationSourceBase] = {}
         self.time = 0.0
@@ -95,5 +104,5 @@ class RippleEngine:
         self.Z[:] = self.propagator.get_state().reshape(self.resolution)
         self.excitation[:] = 0
 
-    def get_field(self) -> Union[np.ndarray, cp.ndarray]:
+    def get_field(self) -> ArrayType:
         return self.Z

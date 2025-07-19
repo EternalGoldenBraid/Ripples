@@ -1,12 +1,13 @@
 from typing import Optional, Union
 
-import cupy as cp
+
 import numpy as np
 from scipy.sparse import coo_matrix
 
+from audioviz.types import ArrayType
 class PoseGraphState:
-    def __init__(self, num_nodes: int, adjacency: Optional[Union[np.ndarray, cp.ndarray]],
-                 backend: Union[np, cp] = np, velocity_smoothing_alpha: float = 1.0):
+    def __init__(self, num_nodes: int, adjacency: Optional[ArrayType],
+                 backend = np, velocity_smoothing_alpha: float = 1.0):
         self.num_nodes = num_nodes
         self.backend = backend
         self.xp = backend

@@ -3,7 +3,6 @@ from threading import Thread, Lock
 from typing import Optional
 
 import numpy as np
-import cupy as cp
 
 class CameraSource:
     """

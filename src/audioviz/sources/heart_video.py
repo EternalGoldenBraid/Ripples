@@ -4,7 +4,6 @@ from itertools import cycle
 
 
 import numpy as np
-import cupy as cp
 import cv2
 from PyQt5.QtCore import Qt
 from loguru import logger as log
@@ -46,7 +45,7 @@ class HeartVideoExcitation(ExcitationSourceBase):
 
         super().__init__(name=name, nominal_peak=1)
         self.fps: Optional[float] = None
-        self.frames: List[Union[np.ndarray, cp.ndarray]] = []
+        self.frames: List[ArrayType] = []
         self.frame: Optional[ArrayType] = None
 
         self.xp = backend
@@ -57,7 +56,7 @@ class HeartVideoExcitation(ExcitationSourceBase):
 
         self.load_video(source) 
         self.video_resolution: Tuple[int, int] = (self.frames[0].shape[0], self.frames[0].shape[1])  # (Hf, Wf)
-        self.out: Union[np.ndarray, cp.ndarray] = self.xp.zeros(self.output_resolution, dtype=self.xp.float32)
+        self.out: ArrayType = self.xp.zeros(self.output_resolution, dtype=self.xp.float32)
         self.num_frames = len(self.frames)
         assert self.fps is not None, "Video FPS must be set!"
         assert self.num_frames > 0, "No frames loaded from video source!"
@@ -70,7 +69,7 @@ class HeartVideoExcitation(ExcitationSourceBase):
         )
 
         self.amplitude: float = amplitude
-        self._prev_mask: Optional[Union[np.ndarray, cp.ndarray]] = None
+        self._prev_mask: Optional[ArrayType] = None
 
     def load_video(self, source: Union[str, Path, np.ndarray]):
 
@@ -104,7 +103,7 @@ class HeartVideoExcitation(ExcitationSourceBase):
         else:                                   # numpy clip already supplied
             self.frames = self.xp.asarray(source, dtype=self.xp.float32) / source.max()
 
-        self.frame_iter: Iterator[Union[np.ndarray, cp.ndarray]] = cycle(self.frames)
+        self.frame_iter: Iterator[ArrayType] = cycle(self.frames)
         
     def get_controls(self):
         H, W = self.output_resolution
@@ -204,7 +203,7 @@ class HeartVideoExcitation(ExcitationSourceBase):
     
         elif mode == "contour":
             if self.xp != np:
-                bin_mask = cp.asnumpy(bin_mask)
+                bin_mask = self.xp.asnumpy(bin_mask)
     
             contours, _ = cv2.findContours(bin_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
             filled = np.zeros_like(bin_mask, dtype=np.uint8)
@@ -253,7 +252,7 @@ class HeartVideoExcitation(ExcitationSourceBase):
         # Extract contour mask
         # TODO Can we not use gpu for this?
         if self.xp != np:
-            bin_mask = cp.asnumpy(overlay_mask).astype(np.uint8)
+            bin_mask = self.xp.asnumpy(overlay_mask).astype(np.uint8)
         else:
             bin_mask = overlay_mask.astype(np.uint8)
 

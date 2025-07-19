@@ -82,13 +82,15 @@ RIPPLE_CONF = dict(
     dx=5e-2,
     speed=10.0,
     damping=0.90,
-    use_gpu=True,
-)
+    use_gpu=False,
+) 
+
 if RIPPLE_CONF["use_gpu"]:
     import cupy as cp
     BACKEND = cp
 else:
     BACKEND = np
+
 AUDIO_EXCITATION_CONF = dict(
     name="Audio Ripple",
     nominal_peak=1.0,

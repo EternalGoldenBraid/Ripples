@@ -1,10 +1,7 @@
 from typing import Optional, Tuple, Dict, Any
 
 
-
 import numpy as np
-import cupy as cp
-import cupyx
 from loguru import logger as log
 from scipy.sparse import coo_matrix
 
@@ -113,7 +110,8 @@ class WavePropagatorGPU:
                  damping: float,
                  use_matrix: bool = True,
                  pose_graph_state: Optional[Any] = None):
-    
+
+        import pdb; pdb.set_trace() 
         self.shape = shape
         self.dx = dx
         self.dt = dt
@@ -143,7 +141,9 @@ class WavePropagatorGPU:
                 raise ValueError("Shape must be 2D (H, W) for stencil mode.")
             self.step = self._step_stencil
             self.add_excitation = self._add_excitation_stencil
-    
+
+        import cupy as cp
+        import cupyx.scipy.sparse as cupyx
         self.Z = cp.zeros(self.shape, dtype=cp.float32)
         self.Z_old = cp.zeros_like(self.Z)
         self.Z_new = cp.zeros_like(self.Z)

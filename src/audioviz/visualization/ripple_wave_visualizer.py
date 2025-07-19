@@ -1,6 +1,5 @@
 from typing import Optional
 
-import cupy as cp
 import pyqtgraph.opengl as gl
 
 import numpy as np
@@ -22,11 +21,15 @@ class RippleWaveVisualizer(QtWidgets.QWidget):
                  dx: float,
                  speed: float,
                  damping: float,
-                 use_gpu: bool = True):
+                 use_gpu: bool):
         super().__init__()
 
         self.control_panel: Optional[ControlPanel] = None
-
+        if use_gpu:
+            import cupy as cp
+            self.xp = cp
+        else:
+            self.xp = np
         self.log_counter_ = 0
         self.use_gpu = use_gpu
         self.dx = dx
@@ -131,7 +134,7 @@ class RippleWaveVisualizer(QtWidgets.QWidget):
         self.engine.update(self.engine.time)
 
         Z = self.engine.get_field()
-        Z_vis = cp.asnumpy(Z) if self.use_gpu else Z
+        Z_vis = self.xp.asnumpy(Z) if self.use_gpu else Z
         Z_vis = Z_vis - np.mean(Z_vis)
 
         ## Add uniform noise
@@ -177,6 +180,7 @@ class RippleWaveVisualizer3D(QtWidgets.QWidget):
         self.control_panel: Optional[ControlPanel] = None
 
         self.use_gpu = use_gpu
+        
         self.dx = dx
         Nx = int(plane_size_m[0] / dx)
         Ny = int(plane_size_m[1] / dx)
@@ -234,7 +238,7 @@ class RippleWaveVisualizer3D(QtWidgets.QWidget):
         self.engine.update(self.engine.time)
 
         Z = self.engine.get_field()
-        Z_vis = cp.asnumpy(Z) if self.use_gpu else Z
+        Z_vis = self.xp.asnumpy(Z) if self.use_gpu else Z
         Z_vis -= np.mean(Z_vis)
         colors = self.get_colors(Z_vis)
 

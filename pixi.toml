@@ -3,10 +3,8 @@ authors = ["Nicklas <gitnicklas@pm.me>"]
 channels = ["conda-forge"]
 description = "Add a short description here"
 name = "AudioViz"
-platforms = ["linux-64"]
+platforms = ["linux-64", "osx-arm64"]
 version = "0.1.0"
-
-[tasks]
 
 [dependencies]
 librosa = "*"
@@ -18,14 +16,19 @@ pyqt = "*"
 loguru = "*"
 pyopengl = "*"
 snakeviz = "*"
-cupy = "*"
 pdoc = "*"
 opencv = "*"
 qdarkstyle = "*"
-python = "3.11.*"
+python = "3.12.*"
+debugpy = ">=1.8.15,<2"
 
+# Platform-specific dependencies
+[target.linux-64.dependencies]
+cupy = "*"
+
+[target.osx-arm64.dependencies]
+# no cupy on macOS
 
 [pypi-dependencies]
 audioviz = { path = ".", editable = true }
 mediapipe = ">=0.10.14, <0.11"
-# mediapipe = { }
