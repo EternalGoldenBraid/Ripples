@@ -147,12 +147,12 @@ class AudioExcitation(ExcitationSourceBase):
         ripple =  self.gain * decay * amps * self.xp.sin(phases - 2 * self.xp.pi * r / wavelengths)
         ripple *= mask
 
-        if not hasattr(self, 'log_counter_'):
-            self.log_counter_ = 0
-        self.log_counter_ += 1
-        if self.log_counter_  == 10:
-            log.debug(f"min: {ripple.min()}, max: {ripple.max()}, mean: {ripple.mean()}")
-            self.log_counter_ = 0
+        # if not hasattr(self, 'log_counter_'):
+        #     self.log_counter_ = 0
+        # self.log_counter_ += 1
+        # if self.log_counter_  == 10:
+        #     log.debug(f"min: {ripple.min()}, max: {ripple.max()}, mean: {ripple.mean()}")
+        #     self.log_counter_ = 0
 
         return {'excitation': ripple.sum(axis=(0, 1))}
 

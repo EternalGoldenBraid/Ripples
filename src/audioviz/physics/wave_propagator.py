@@ -8,7 +8,9 @@ import cupyx
 from loguru import logger as log
 from scipy.sparse import coo_matrix
 
-from audioviz.utils.graph_utils import build_grid_adjacency
+from audioviz.utils.graph_utils import (
+        build_grid_adjacency, apply_boundary_conditions
+)
 
 class WavePropagatorCPU:
     """
@@ -123,7 +125,19 @@ class WavePropagatorGPU:
         self.c2_dt2: float = (self.c * self.dt / self.dx)**2
     
         if use_matrix:
-            self._init_matrix(shape, pose_graph_state)
+
+            # mask = np.zeros(shape, dtype=bool)
+            # # Wall max a circle of ones in the center of the grid
+            # radius = min(shape) // 4  # Example radius
+            # center = (shape[0] // 2, shape[1] // 2)
+            # # Set to ones on the perimeter of the circle not on the inside
+            # for i in range(shape[0]):
+            #     for j in range(shape[1]):
+            #         if (i - center[0])**2 + (j - center[1])**2 <= radius**2:
+            #             mask[i, j] = True
+            self._init_matrix(shape=shape, pose_graph_state=pose_graph_state,
+                              # mask=mask
+                              )
         else:
             if len(shape) != 2:
                 raise ValueError("Shape must be 2D (H, W) for stencil mode.")
@@ -133,9 +147,23 @@ class WavePropagatorGPU:
         self.Z = cp.zeros(self.shape, dtype=cp.float32)
         self.Z_old = cp.zeros_like(self.Z)
         self.Z_new = cp.zeros_like(self.Z)
+        
+    def update_boundary_mask(self, mask: np.ndarray):
+        """
+        Updates the internal Laplacian using a new boundary mask.
+        
+        Parameters:
+        -----------
+        mask : np.ndarray
+            Boolean array (H, W) where True indicates wall/boundary.
+        """
+        assert mask.shape == self.shape, f"Mask shape {mask.shape} must match simulation shape {self.shape}."
+        self._init_matrix(self.shape, mask=mask)
+
 
     def _init_matrix(self,
                      shape: Tuple[int, ...],
+                     mask: Optional[np.ndarray] = None,
                      pose_graph_state: Optional[Any] = None):
     
         log.info("Building internal Laplacian matrix...")
@@ -149,32 +177,30 @@ class WavePropagatorGPU:
             # --- Future: pose graph logic here ---
     
         else:
-            # --- Compute degree matrix ---
-            degrees = np.array(grid_adj.sum(axis=1)).flatten()
-            D = coo_matrix((degrees, (np.arange(N_grid), np.arange(N_grid))), shape=(N_grid, N_grid))
     
-            # --- Compute Laplacian ---
-            wall_mask = np.zeros(shape, dtype=bool)
-            # Wall max a circle of ones in the center of the grid
-            radius = min(shape) // 4  # Example radius
-            center = (shape[0] // 2, shape[1] // 2)
-            # Set to ones on the perimeter of the circle not on the inside
-            for i in range(shape[0]):
-                for j in range(shape[1]):
-                    if (i - center[0])**2 + (j - center[1])**2 <= radius**2:
-                        wall_mask[i, j] = True
+
+            if mask is not None:
+                L_coo = apply_boundary_conditions(
+                        adj=grid_adj, shape=shape,
+                        mask=mask, 
+                        # bc_type="neumann"
+                        bc_type="dirichlet",
+                        reflection_R=0.5,  # Example reflection ratio
+                )
+                log.info("✅ Grid Laplacian with boundary constraints constructed.")
+            else:
+                from scipy.sparse import diags, coo_matrix
+                degrees = diags(np.array(grid_adj.sum(axis=1)).flatten())
+                rows, cols = grid_adj.row, grid_adj.col
+                data       = grid_adj.data.copy()
+                assert len(shape) == 2, "Shape must be 2D (H, W) for grid Laplacian."
+                N = shape[0] * shape[1]
+                A = coo_matrix((data, (rows, cols)), shape=(N, N))
+                D = diags(np.asarray(A.sum(axis=1)).flatten(), dtype=np.float32)
+                L_coo = (degrees - A).tocoo()
 
 
-            from audioviz.utils.graph_utils import apply_boundary_conditions
-            L_coo = apply_boundary_conditions(
-                    adj=grid_adj, shape=shape,
-                    mask=wall_mask, 
-                    # bc_type="neumann"
-                    bc_type="dirichlet",
-                    reflection_R=0.5,  # Example reflection ratio
-            )
-            # L_coo = D - grid_adj
-            log.info("✅ Grid Laplacian (circular BC) constructed.")
+                log.info("✅ Grid Laplacian without boundary constraints constructed.")
     
         # --- Convert to CSR and move to GPU ---
         L_csr = L_coo.tocsr()

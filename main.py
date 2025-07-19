@@ -49,16 +49,17 @@ FLAGS = dict(
     show_helix=False,
     use_pose_graph=False,
 
-    # use_audio_excitation=True,
-    # use_heart_video=True,
-    # use_synthetic=True,
-
     use_audio_excitation=True,
-    use_heart_video=False,
-    use_synthetic=True,
+    use_heart_video=True,
+    use_synthetic=False,
+
+    # use_audio_excitation=True,
+    # use_heart_video=False,
+    # use_synthetic=True,
 )
 
-HEART_VIDEO_PATH = Path("Data/GeneratedHearts/test_e050_p002.avi")
+# HEART_VIDEO_PATH = Path("Data/GeneratedHearts/test_e050_p002.avi")
+HEART_VIDEO_PATH = Path("Data/RippleHearts/vids/test_e400_p002.avi")
 WAV_PATH         = Path("data/test.wav")
 
 # -----------------------------------------------------------------------------

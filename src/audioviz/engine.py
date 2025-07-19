@@ -53,11 +53,25 @@ class RippleEngine:
         self.sources: Dict[str, ExcitationSourceBase] = {}
         self.time = 0.0
 
+        self.mask_set = False
+
     def add_source(self, source: ExcitationSourceBase):
         if source.name in self.sources:
             raise ValueError(f"Source '{source.name}' already exists.")
+
         self.sources[source.name] = source
         log.info(f"Added source '{source.name}' to RippleEngine.")
+
+
+        # NEW: check for boundary mask
+        if hasattr(source, "get_boundary_mask"):
+            mask: ArrayType = source.get_boundary_mask()
+            if mask is not None:
+                log.info(f"Source '{source.name}' provides boundary mask. Updating propagator...")
+                self.propagator.update_boundary_mask(mask)
+        else:
+            log.warning(f"Source '{source.name}' does not provide a boundary mask.")
+
 
     def update(self, t: float):
         self.time = t
@@ -66,6 +80,15 @@ class RippleEngine:
             result = source(t)
             weight = 1 / max(len(self.sources), 1)
             self.excitation[:] += weight * result["excitation"]
+
+            if name == 'heart':
+                boundary_mask = result['boundary']['region']
+
+        if not self.mask_set:
+            self.propagator.update_boundary_mask(
+                mask=boundary_mask
+            )
+            self.mask_set = True
 
         self.propagator.add_excitation(self.excitation)
         self.propagator.step()

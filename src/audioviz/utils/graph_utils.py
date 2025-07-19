@@ -89,20 +89,6 @@ def apply_boundary_conditions(
 
     return (D_mod - A_mod).tocoo()
 
-def apply_boundary_conditions_old(adj: coo_matrix, shape: Tuple[int, int], bc_type: str = "periodic") -> coo_matrix:
-    H, W = shape
-
-    if bc_type == "periodic":
-        raise NotImplementedError("Periodic BC logic to reconnect edges not implemented yet.")
-    elif bc_type == "dirichlet":
-        raise NotImplementedError("Dirichlet BC logic to remove edge connections on boundaries not implemented yet.")
-    elif bc_type == "neumann":
-        raise NotImplementedError("Neumann BC logic to adjust edge weights not implemented yet.")
-    else:
-        raise ValueError(f"Unknown boundary condition: {bc_type}")
-
-    return adj  # In default (future fallback) could return unmodified
-
 def combine_laplacians(L1: coo_matrix, L2: coo_matrix, L_coupling: coo_matrix = None) -> coo_matrix:
     """
     Combine two Laplacians (and optional coupling Laplacian).

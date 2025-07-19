@@ -13,6 +13,7 @@ from loguru import logger as log
 from .base import ExcitationSourceBase
 from audioviz.audio_processing.audio_processor import AudioProcessor
 from audioviz.utils.utils import resize_array
+from audioviz.types import ArrayType
 
 class HeartVideoExcitation(ExcitationSourceBase):
     """Excitation driven by a 2-D mask (image frame) that pulses over time.
@@ -46,6 +47,7 @@ class HeartVideoExcitation(ExcitationSourceBase):
         super().__init__(name=name, nominal_peak=1)
         self.fps: Optional[float] = None
         self.frames: List[Union[np.ndarray, cp.ndarray]] = []
+        self.frame: Optional[ArrayType] = None
 
         self.xp = backend
         self.output_resolution = resolution
@@ -96,7 +98,9 @@ class HeartVideoExcitation(ExcitationSourceBase):
             if not frames_np:
                 raise ValueError("No frames decoded from video!")
 
-            self.frames = self.xp.asarray(np.stack(frames_np), dtype=self.xp.float32)
+            self.frames: ArrayType = self.xp.asarray(np.stack(frames_np), dtype=self.xp.float32)
+            self._frame_buffer: ArrayType = self.xp.zeros_like(self.frames[0])  # first frame as a template
+            self._mask_buffer: ArrayType = self.xp.zeros_like(self.frames[0])  # first frame as a template
         else:                                   # numpy clip already supplied
             self.frames = self.xp.asarray(source, dtype=self.xp.float32) / source.max()
 
@@ -151,6 +155,66 @@ class HeartVideoExcitation(ExcitationSourceBase):
     def _set_pos_x(self, x: float): self.position = (x, self.position[1])
     def _set_pos_y(self, y: float): self.position = (self.position[0], y)
 
+
+    def extract_mask(self, frame, mode: str = "raw", threshold: float = 0.5) -> ArrayType:
+        """
+        Returns a static binary mask from the current frame.
+        
+        Parameters:
+        -----------
+        mode : str
+            "raw"     → resized + centered intensity mask
+            "binary"  → thresholded mask
+            "contour" → binary mask of closed contour(s) using OpenCV
+        
+        threshold : float
+            Applied if mode is "binary" or "contour"
+        
+        Returns:
+        --------
+        mask : ArrayType (float32 or bool)
+            Mask in output field shape (H, W)
+        """
+        mask = self.xp.asarray(frame, dtype=self.xp.float32)
+    
+        H_out, W_out = self.output_resolution
+        target_w = int(W_out * 0.25)
+        target_h = int(mask.shape[0] * target_w / mask.shape[1])
+        mask_resized = resize_array(mask, target_h, target_w, xp=self.xp)
+    
+        cx = int(self.position[1] * (W_out - 1))
+        cy = int(self.position[0] * (H_out - 1))
+        h, w = mask_resized.shape
+        top    = max(0, cy - h // 2)
+        left   = max(0, cx - w // 2)
+        bottom = min(H_out, top  + h)
+        right  = min(W_out, left + w)
+    
+        out = self.xp.zeros((H_out, W_out), dtype=self.xp.float32)
+        mask_crop = mask_resized[:bottom-top, :right-left]
+        out[top:bottom, left:right] = mask_crop - self.xp.mean(mask_crop)
+    
+        if mode == "raw":
+            return out
+    
+        bin_mask = (out > threshold).astype(self.xp.uint8)
+    
+        if mode == "binary":
+            return bin_mask
+    
+        elif mode == "contour":
+            if self.xp != np:
+                bin_mask = cp.asnumpy(bin_mask)
+    
+            contours, _ = cv2.findContours(bin_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            filled = np.zeros_like(bin_mask, dtype=np.uint8)
+            cv2.drawContours(filled, contours, -1, 1, thickness=-1)  # fill all contours
+    
+            return filled.astype(bool)
+    
+        else:
+            raise ValueError(f"Unknown mode '{mode}' for extract_mask")
+
     # ---------------------------------------------------------------- runtime
     def __call__(self, t: float, channel_idx=1) -> Dict[str, Any]:
         # freq = (self.audio_processor.current_top_k_frequencies[channel_idx][0] \
@@ -162,9 +226,9 @@ class HeartVideoExcitation(ExcitationSourceBase):
         # frame = self.frames[frame_idx]           # NumPy or CuPy slice
 
         self.out[:] = 0.0  # reset output field
-        frame = next(self.frame_iter)
+        self._frame_buffer[:] = next(self.frame_iter)
 
-        mask  = self.xp.asarray(frame, dtype=self.xp.float32)
+        mask  = self.xp.asarray(self._frame_buffer[:], dtype=self.xp.float32)
         H_out, W_out = self.output_resolution
         
         # resize mask to ¼ of the field width
@@ -183,10 +247,21 @@ class HeartVideoExcitation(ExcitationSourceBase):
         mask_crop = mask_resized[:bottom-top, :right-left]
         mask_crop = mask_crop - self.xp.mean(mask_crop)
 
-        # self.out[top:bottom,left:right] = mask_crop * self.amplitude
-
         self.out[top:bottom, left:right] = self.amplitude * mask_crop
         overlay_mask = self.out > 0.0
+
+        # Extract contour mask
+        # TODO Can we not use gpu for this?
+        if self.xp != np:
+            bin_mask = cp.asnumpy(overlay_mask).astype(np.uint8)
+        else:
+            bin_mask = overlay_mask.astype(np.uint8)
+
+        contours, _ = cv2.findContours(bin_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        filled = np.zeros_like(bin_mask, dtype=np.uint8)
+        cv2.drawContours(filled, contours, -1, 1, thickness=-1)  # fill all contours
+    
+        edge_mask = filled.astype(bool)
 
         if not hasattr(self, 'log_counter_'):
             self.log_counter_ = 0
@@ -195,9 +270,24 @@ class HeartVideoExcitation(ExcitationSourceBase):
             log.debug(f"min: {self.out.min()}, max: {self.out.max()}, mean: {self.out.mean()}")
             self.log_counter_ = 0
 
-        # overlay_mask = self.xp.zeros_like(self.out, dtype=bool)
-        # overlay_mask[top:bottom, left:right] = True
+        self.out[:] = .0
+
         return {
             'excitation': self.out,
                 'overlay': {'mask': overlay_mask},
+                'boundary': {'region': edge_mask},
         }
+
+    def get_boundary_mask(self) -> ArrayType:
+        shape = self.output_resolution
+        self.mask = np.zeros(shape, dtype=bool)
+        # Wall max a circle of ones in the center of the grid
+        radius = min(shape) // 4  # Example radius
+        center = (shape[0] // 2, shape[1] // 2)
+        # Set to ones on the perimeter of the circle not on the inside
+        for i in range(shape[0]):
+            for j in range(shape[1]):
+                if (i - center[0])**2 + (j - center[1])**2 <= radius**2:
+                    self.mask[i, j] = True
+
+        return self.mask

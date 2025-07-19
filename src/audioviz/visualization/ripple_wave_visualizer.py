@@ -79,25 +79,81 @@ class RippleWaveVisualizer(QtWidgets.QWidget):
 
         self.setLayout(layout)
 
+        # Normalization
+        self.vmin_ema = None
+        self.vmax_ema = None
+        self.alpha = 0.9  # TODO add to controls
+
+    def adaptive_normalize(self, Z: np.ndarray, 
+                       alpha: float = 0.1,
+                       log_scale: bool = False
+                      ) -> np.ndarray:
+        """
+        Applies adaptive normalization to a 2D array using EMA of percentiles.
+        
+        Parameters:
+        -----------
+        Z         : np.ndarray      – input array (2D, typically the wave field)
+        alpha     : float            – smoothing factor for EMA [0–1]
+        log_scale : bool             – apply log1p(abs(Z)) * sign(Z) before scaling
+        
+        Returns:
+        --------
+        Z_norm    : np.ndarray       – normalized image in [-1, 1]
+        """
+        if log_scale:
+            Z_proc = np.log1p(np.abs(Z)) * np.sign(Z)
+        else:
+            Z_proc = Z
+
+        # Percentile-based bounds
+        vmin_t, vmax_t = np.percentile(Z_proc, [1, 99])
+
+        # Update EMA bounds
+        if self.vmin_ema is None or self.vmax_ema is None:
+            # Initialize with the first values
+            new_vmin, new_vmax = (1-alpha)*vmin_t, (1-alpha)*vmax_t
+        else:
+            new_vmin = (1 - alpha) * self.vmin_ema + alpha * vmin_t
+            new_vmax = (1 - alpha) * self.vmax_ema + alpha * vmax_t
+
+        # Normalize to [-1, 1]
+        Z_norm = np.clip((Z_proc - new_vmin) / (new_vmax - new_vmin + 1e-6), 0, 1)
+        Z_norm = Z_norm * 2 - 1
+
+        self.vmin_ema, self.vmax_ema = new_vmin, new_vmax
+        return Z_norm
+        # return Z_norm, new_vmin, new_vmax
+
+
     def update_visualization(self):
         self.engine.time += self.engine.dt
         self.engine.update(self.engine.time)
 
         Z = self.engine.get_field()
         Z_vis = cp.asnumpy(Z) if self.use_gpu else Z
+        Z_vis = Z_vis - np.mean(Z_vis)
 
         ## Add uniform noise
         # noise = np.random.uniform(-0.00, 0.1, Z_vis.shape)
         # Z_vis += noise
 
-        Z_vis -= np.mean(Z_vis)
+        # Z_vis= self.adaptive_normalize(Z=cp.asnumpy(Z) if self.use_gpu else Z,
+        #             alpha=self.alpha, log_scale=False
+        # )
 
 
+        # self.image_item.setImage(Z_vis, levels=(-1,1))
         self.image_item.setImage(Z_vis, autoLevels=False)
 
         self.log_counter_ += 1
         if self.log_counter_ == 30:
-            log.debug(f"min: {Z_vis.min()}, max: {Z_vis.max()}, mean: {Z_vis.mean()}")
+            log.debug(
+                f"""
+                Z_vis: min: {Z_vis.min()}, max: {Z_vis.max()}, mean: {Z_vis.mean()} 
+                Z: min: {Z.min()}, max: {Z.max()}, mean: {Z.mean()}
+                """
+            )
             self.log_counter_ = 0
 
 
