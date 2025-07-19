@@ -136,11 +136,9 @@ class RippleWaveVisualizer(QtWidgets.QWidget):
         Z_vis = (1-alpha) * Z_vis + alpha * cp.asnumpy(overlay)
         self.image_item.setImage(Z_vis, autoLevels=False)
 
-
         # Z_vis= self.adaptive_normalize(Z=cp.asnumpy(Z) if self.use_gpu else Z,
         #             alpha=self.alpha, log_scale=False
         # )
-        # alpha = 0.5
         # Z_vis = (1-alpha) * Z_vis + alpha * cp.asnumpy(overlay)
         # self.image_item.setImage(Z_vis, levels=(-1,1))
 

@@ -75,11 +75,12 @@ N_FFT      = 256
 WINDOW_MS  = 20
 HOP_RATIO  = 1 / 4
 
-# USE_3D = True  # or False
-USE_3D = False
+USE_3D = True  # or False
+# USE_3D = False
 
 RIPPLE_CONF = dict(
     # plane_size_m=(150., 150.),
+
     # plane_size_m=(100., 100.),
     plane_size_m=(50., 50.),
     # plane_size_m=(100., 100.),

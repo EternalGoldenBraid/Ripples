@@ -92,9 +92,9 @@ class RippleEngine:
             )
             self.mask_set = True
 
-        if self.time > 1.7 and self.time < 1.8:
-            self.propagator.set_boundary(boundary_id='default')
-            alpha=0.0
+        # if self.time > 1.7 and self.time < 1.8:
+        #     self.propagator.set_boundary(boundary_id='default')
+        #     alpha=0.0
 
         ## Add uniform noise
         # noise = self.xp.random.uniform(-0.00, 0.1, self.Z.shape)

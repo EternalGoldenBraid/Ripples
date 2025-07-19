@@ -257,11 +257,18 @@ class HeartVideoExcitation(ExcitationSourceBase):
         else:
             bin_mask = overlay_mask.astype(np.uint8)
 
+
         contours, _ = cv2.findContours(bin_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         filled = np.zeros_like(bin_mask, dtype=np.uint8)
-        cv2.drawContours(filled, contours, -1, 1, thickness=-1)  # fill all contours
+        # cv2.drawContours(filled, contours, -1, 1, thickness=-1)  # fill all contours
+        cv2.drawContours(filled, contours, -1, 1, thickness=1)
     
         edge_mask = filled.astype(bool)
+        edge_overlay = filled.astype(np.float32)
+        edge_overlay = cv2.GaussianBlur(edge_overlay, (3, 3), sigmaX=1)
+        edge_overlay -= edge_overlay.mean()
+        edge_overlay /= (np.abs(edge_overlay).max() + 1e-6)  # now in roughly [-1, 1]
+
 
         if not hasattr(self, 'log_counter_'):
             self.log_counter_ = 0
@@ -274,7 +281,7 @@ class HeartVideoExcitation(ExcitationSourceBase):
 
         return {
             'excitation': self.out,
-                'overlay': {'mask': overlay_mask},
+                'overlay': {'mask': edge_overlay},
                 'boundary': {'region': edge_mask},
         }
 
