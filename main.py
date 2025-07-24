@@ -2,22 +2,21 @@
 AudioRipple – demo launcher
 ===========================
 
-Run three visualizers (spectrogram, ripple-field, helix) with any
+Run visualizers (spectrogram, ripple-field, helix) with any
 combination of:
 
     • live microphone / interface
     • prerecorded WAV file
     • synthetic / heart-video excitations
 
-Edit the `RUN_MODE` and feature flags at the top; no other changes
+Edit the `RUN_MODE` and FLAGS at the top; no other changes
 needed when you switch setups.
 """
 from pathlib import Path
-from typing import Dict, Union
+from typing import Dict
 import signal
 import sys
 
-# Third-party
 import numpy as np
 import librosa as lr
 import qdarkstyle
@@ -26,15 +25,17 @@ from matplotlib import cm
 from matplotlib.colors import Normalize
 from loguru import logger
 
-# Local modules
 from audioviz.audio_processing.audio_processor import AudioProcessor
-from audioviz.utils.audio_devices import select_devices, AudioDeviceDesktop
+from audioviz.utils.audio_devices import select_devices
 from audioviz.utils.guitar_profiles import GuitarProfile
 from audioviz.visualization.spectrogram_visualizer import SpectrogramVisualizer
-from audioviz.visualization.ripple_wave_visualizer import RippleWaveVisualizer
+from audioviz.visualization.ripple_wave_visualizer import RippleWaveVisualizer, RippleWaveVisualizer3D
 from audioviz.visualization.pitch_helix_visualizer import PitchHelixVisualizer
 
+from audioviz.sources.pose.mediapipe_pose_source import MediaPipePoseExtractor
+from audioviz.sources.pose.pose_graph_state import PoseGraphState
 from audioviz.sources.audio import AudioExcitation
+from audioviz.sources.camera import CameraSource
 from audioviz.sources.heart_video import HeartVideoExcitation
 from audioviz.sources.synthetic import SyntheticPointExcitation
 
@@ -43,44 +44,72 @@ from audioviz.sources.synthetic import SyntheticPointExcitation
 # -----------------------------------------------------------------------------
 RUN_MODE = "live"        # "live" | "wav" | "headless"
 FLAGS = dict(
+    # show_spectrogram=True,
     show_spectrogram=False,
     show_ripples=True,
     show_helix=False,
+    use_pose_graph=False,
 
-    # use_audio_excitation=True,
-    # use_heart_video=False,
-    # use_synthetic=False,
-
-    use_audio_excitation=False,
+    use_audio_excitation=True,
     use_heart_video=True,
     use_synthetic=False,
 
-    # use_audio_excitation=False,
+    # use_audio_excitation=True,
     # use_heart_video=False,
     # use_synthetic=True,
 )
 
-HEART_VIDEO_PATH = Path("Data/GeneratedHearts/heart_mri.mp4")
+# HEART_VIDEO_PATH = Path("Data/GeneratedHearts/test_e050_p002.avi")
+person_id: str = "002"
+# epoch_id: str = "400"
+epoch_id: str = "005"
+HEART_VIDEO_PATH = Path(f"Data/RippleHearts/vids/test_e{epoch_id}_p{person_id}.avi")
+HEART_ECG_PATH = Path(f"Data/RippleHearts/ecg_{person_id}.npy")
 WAV_PATH         = Path("data/test.wav")
-
 
 # -----------------------------------------------------------------------------
 # 2) GLOBAL PARAMS
 # -----------------------------------------------------------------------------
-SR_DEFAULT = 44100            # default when not streaming
+SR_DEFAULT = 44100
 N_FFT      = 256
 WINDOW_MS  = 20
 HOP_RATIO  = 1 / 4
 
+USE_3D = True  # or False
+# USE_3D = False
+
 RIPPLE_CONF = dict(
-    # plane_size_m=(0.30, 0.30),        # physical plane if needed
-    plane_size_m=(10., 10.),        # physical plane if needed
-    dx=5e-3,                     # pixel size in meters
+    # plane_size_m=(150., 150.),
+
+    # plane_size_m=(100., 100.),
+    plane_size_m=(50., 50.),
+    # plane_size_m=(100., 100.),
+    # dx=1e-1,
+    dx=5e-2,
     speed=10.0,
     damping=0.90,
     use_gpu=True,
 )
+if RIPPLE_CONF["use_gpu"]:
+    import cupy as cp
+    BACKEND = cp
+else:
+    BACKEND = np
+AUDIO_EXCITATION_CONF = dict(
+    name="Audio Ripple",
+    nominal_peak=1.0,
+    position=(0.5, 0.5),
+    decay_alpha=144.0,
+    gain=0.0,
+    speed=RIPPLE_CONF["speed"],
+    dx=RIPPLE_CONF["dx"],
+)
 
+HEART_EXCITATION_CONF = dict(
+    source=HEART_VIDEO_PATH,
+    position=(0.5, 0.5),
+    amplitude=1.0,
+)
 
 # -----------------------------------------------------------------------------
 # 3) MAIN
@@ -115,7 +144,6 @@ def main() -> None:
         "io_blocksize": 4096,
     }
 
-    # Spectrogram params
     win_len = 2 ** int(np.log2((WINDOW_MS / 1000) * sr))
     spec_params = dict(
         n_fft=N_FFT,
@@ -162,41 +190,47 @@ def main() -> None:
         spectro.resize(800, 600)
         spectro.show()
 
-    # Ripple window & sources
     if FLAGS["show_ripples"]:
-        ripple = RippleWaveVisualizer(**RIPPLE_CONF)
+
+        if USE_3D:
+            ripple = RippleWaveVisualizer3D(**RIPPLE_CONF)
+        else:
+            ripple = RippleWaveVisualizer(**RIPPLE_CONF)
+
+        # ripple = RippleWaveVisualizer(**RIPPLE_CONF)
         ripple.setWindowTitle("Ripple Field")
-        ripple.resize(600, 600)
+        ripple.resize(800, 600)
+
+        if FLAGS["use_pose_graph"]:
+            camera = CameraSource(camera_index=0, width=640, height=480)
+            camera.start()
+            extractor = MediaPipePoseExtractor()
+            pose_state = PoseGraphState(num_nodes=33, adjacency=extractor._get_static_adjacency(33))
+            ripple.engine.add_pose_graph(camera=camera, extractor=extractor, pose_graph_state=pose_state)
 
         if FLAGS["use_audio_excitation"]:
-            ripple.add_excitation_source(
+            ripple.engine.add_source(
                 AudioExcitation(
-                    name="Audio Ripple",
-                    nominal_peak=1.0,
+                    **AUDIO_EXCITATION_CONF,
                     processor=processor,
-                    position=(0.5, 0.5),
-                    max_frequency=ripple.max_frequency,
-                    gain=0.0,
-                    speed=RIPPLE_CONF["speed"],
-                    dx=RIPPLE_CONF["dx"],
+                    max_frequency=ripple.engine.max_frequency,
                     resolution=ripple.resolution,
-                    backend=ripple.backend,
+                    backend=BACKEND,
                 )
             )
 
         if FLAGS["use_heart_video"]:
-            ripple.add_excitation_source(
+            ripple.engine.add_source(
                 HeartVideoExcitation(
-                    source=HEART_VIDEO_PATH,
+                    **HEART_EXCITATION_CONF,
+
                     resolution=ripple.resolution,
-                    position=(0.3, 0.6),
-                    backend=ripple.backend,
-                    # audio_processor=processor,
+                    backend=BACKEND,
                 )
             )
 
         if FLAGS["use_synthetic"]:
-            ripple.add_excitation_source(
+            ripple.engine.add_source(
                 SyntheticPointExcitation(
                     name="Synthetic Ripple",
                     dx=RIPPLE_CONF["dx"],
@@ -204,13 +238,13 @@ def main() -> None:
                     position=(0.5, 0.5),
                     frequency=400,
                     speed=RIPPLE_CONF["speed"],
-                    backend=ripple.backend,
+                    backend=BACKEND,
                 )
             )
 
         ripple.show()
+        ripple.toggle_controls()
 
-    # Optional helix (Legacy)
     if FLAGS["show_helix"]:
         helix = PitchHelixVisualizer(
             processor,
@@ -236,6 +270,5 @@ def main() -> None:
         processor.stop()
 
 
-# -----------------------------------------------------------------------------
 if __name__ == "__main__":
     main()

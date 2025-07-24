@@ -34,7 +34,8 @@ class SyntheticPointExcitation(ExcitationSourceBase):
         - No propagation mask or boundary behavior implemented.
     """
 
-    def __init__(self, dx: float, resolution: Tuple[int, int], position, amplitude:float=1.0, frequency:float=1.0, decay_alpha:float=0.0, speed:float=340.0,
+    def __init__(self, dx: float, resolution: Tuple[int, int], position, amplitude:float=0.0,
+                 frequency:float=1.0, decay_alpha:float=0.0, speed:float=340.0,
                  backend=np, name: str = "Synthetic Point Excitation", nominal_peak: float=10.0):
         super().__init__(name=name, nominal_peak=nominal_peak)
 
@@ -75,13 +76,6 @@ class SyntheticPointExcitation(ExcitationSourceBase):
         propagation_limit = self.speed * t
         mask = r_m <= propagation_limit
         ripple *= mask
-
-        # if not hasattr(self, 'log_counter_'):
-        #     self.log_counter_ = 0
-        # self.log_counter_ += 1
-        # if self.log_counter_  == 10:
-        #     log.debug(f"min: {ripple.min()}, max: {ripple.max()}, mean: {ripple.mean()}")
-        #     self.log_counter_ = 0
 
         return {'excitation': ripple}
 

@@ -108,6 +108,179 @@ c2\_dt2 &= \left(\frac{c \Delta t}{\Delta x}\right)^2.
 \frac{c \Delta t}{\Delta x} \le \frac{1}{\sqrt{2}}.
 \end{equation}
 
+% --------------------------------------------------------------
+\newpage
+\section*{Boundary Conditions}
+\label{sec:bc-detailed}
+
+Finite-difference solvers need a rule for every “missing neighbour”
+that lies outside the computational grid.  Four families cover most
+practical situations:
+
+\subsection*{1. Periodic (wrap-around)}
+
+Neighbour indices are taken modulo the grid size, so waves leaving one
+edge instantly re-enter from the opposite edge.  Energy is conserved and
+no reflection occurs.
+
+\subsection*{2. Dirichlet (fixed value)}
+
+We require
+\[
+Z = Z_\mathrm{bnd}\quad (\text{often } Z_\mathrm{bnd}=0).
+\]
+Physically this models a string clamped at its end or an acoustic
+pressure-release surface.  Waves reflect with \emph{unit amplitude} and a
+\emph{\(180^\circ\) phase flip}.  No energy is absorbed unless additional
+damping terms are added.
+
+\subsection*{3. Neumann (zero-gradient)}
+
+We impose
+\[
+\partial_{\mathbf n}Z = 0,
+\]
+i.e.\ the normal derivative vanishes.  This represents a perfectly rigid
+wall (hard boundary) or a free string end.  Waves reflect with unit
+amplitude and \emph{no} phase flip.
+
+\subsection*{4. Absorbing / radiative}
+
+To let energy leave the domain, we add a spatially varying damping term
+\(-\sigma(\mathbf x)\,Z\), often chosen to increase smoothly toward the
+grid edge (‘‘sponge layer’’) or derived from a perfectly matched layer
+(PML).  \(\sigma\) can itself be frequency-dependent to model materials
+that absorb high frequencies more strongly than low.
+
+\bigskip
+\noindent
+\textbf{Unified view.}  All four cases can be expressed with the mask-based
+Laplacian of Section~\ref{sec:mask-bc}: set edge weights and (optionally)
+diagonal damping so the discrete operator already \emph{knows} the
+boundary behaviour—no per-step if-statements are needed.
+% --------------------------------------------------------------
+
+% --------------------------------------------------------------
+\newpage
+\section*{Internal Reflective (and Absorbing) Interfaces}
+\label{sec:mask-bc}
+
+Suppose we embed an arbitrary interface (e.g.\ a circle) inside a
+rectangular grid.  A binary mask
+\[
+M_{ij}\;=\;\begin{cases}
+1, & \text{cell lies on the interface},\\
+0, & \text{otherwise}
+\end{cases}
+\]
+marks those locations.
+
+\subsection*{1. Continuous boundary statements}
+
+\begin{itemize}
+  \item \textbf{Dirichlet:} \(Z=0\) at the interface  
+        (soft wall, pressure release).  Reflection coefficient
+        \(R=-1\) (full magnitude, phase inversion).
+  \item \textbf{Neumann:} \(\partial_{\mathbf n}Z=0\)  
+        (rigid wall).  Reflection coefficient \(R=+1\).
+\end{itemize}
+
+\subsection*{2. Why the ghost values are $-Z$ or $+Z$}
+
+Consider a one-dimensional grid with points \(\dots,\,i-1,\,i,\,i+1,\dots\)
+where \(i\) is just \emph{inside} the interface.
+
+\begin{enumerate}
+\item The second derivative at \(i\) needs \(Z_{i+1}\), which we do not
+      store.  We invent a \emph{ghost value} \(Z^\ast_{i+1}\).
+\item For a Dirichlet wall we want the physical displacement to be zero
+      \emph{exactly halfway} between \(i\) and \(i+1\).  Extending the
+      function \emph{oddly} (\(Z(-x)=-Z(x)\)) guarantees that midpoint
+      is zero.  Hence
+      \[
+        Z^\ast_{i+1} = -\,Z_i.
+      \]
+\item For a Neumann wall we want zero slope, so we extend the function
+      \emph{evenly} (\(Z(-x)=Z(x)\)), giving
+      \[
+        Z^\ast_{i+1} = Z_i.
+      \]
+\end{enumerate}
+
+\paragraph{Stencil check (1-D)}
+
+\[
+\frac{Z^\ast_{i+1}-2Z_i+Z_{i-1}}{(\Delta x)^2}=
+\begin{cases}
+\dfrac{-3Z_i+Z_{i-1}}{(\Delta x)^2}, & \text{Dirichlet},\\[6pt]
+\dfrac{-Z_i+Z_{i-1}}{(\Delta x)^2},  & \text{Neumann}.
+\end{cases}
+\]
+Both choices recover the correct reflective behaviour in leap-frog
+time stepping.
+
+\subsection*{3. Masked Laplacian (graph view)}
+
+Define edge indicators
+\(\eta^{\uparrow}_{ij},\eta^{\downarrow}_{ij},
+ \eta^{\leftarrow}_{ij},\eta^{\rightarrow}_{ij}\in\{0,1\}\)
+that equal 1 when the neighbour is \emph{not} masked.
+Let \(d_{ij}=\sum\eta\).  Then
+\[
+\nabla^2_{\text{mask}}Z_{ij}=
+\bigl(
+  \eta^{\uparrow}Z_{i-1,j}+\eta^{\downarrow}Z_{i+1,j}
+ +\eta^{\leftarrow}Z_{i,j-1}+\eta^{\rightarrow}Z_{i,j+1}
+\bigr)
+-
+\begin{cases}
+d_{ij}\,Z_{ij}, & \text{Neumann},\\[6pt]
+4\,Z_{ij}, & \text{Dirichlet}.
+\end{cases}
+\]
+Setting the diagonal to 4 in the Dirichlet case mimics the
+\(Z^\ast=-Z\) rule while keeping the operator symmetric.
+
+\subsection*{4. Partial transmission (hybrid interface)}
+
+We can interpolate continuously between full reflection and full
+transmission by scaling each edge that crosses the interface:
+
+\[
+w\,\in\,[0,1],\quad
+R=\frac{1-w}{1+w},\qquad
+w=\frac{1-R}{1+R}.
+\]
+
+\begin{itemize}
+  \item \(w=0\;\Rightarrow\;R=1\): perfect mirror.
+  \item \(w=1\;\Rightarrow\;R=0\): transparent membrane.
+  \item \(0<w<1\): partial reflection \(\bigl(|R|<1\bigr)\).
+\end{itemize}
+
+Implementationally we multiply the adjacency entries that cross the
+mask by \(w\).
+
+\subsection*{5. Absorbing (damped) interface}
+
+If a portion of the wave should disappear inside the interface (e.g.,
+porous absorber), add a local damping term
+\(-\sigma_{ij}\,Z_{ij}\) with \(\sigma_{ij}>0\).
+Frequency-dependent absorption can be modelled by letting
+\(\sigma\) (or \(w\)) depend on frequency—a topic beyond this primer.
+
+\paragraph{Stability.}  Because the modified Laplacian remains symmetric
+positive semi-definite (and damping is non-negative), the standard
+CFL limit
+\[
+c\,\Delta t/\Delta x \;\le\; 1/\sqrt{2}
+\]
+still guarantees stability.
+
+% --------------------------------------------------------------
+
+% =====================================================================
+
 \section*{Graph Laplacian Viewpoint}
 
 The discrete Laplacian matrix \(L\) on a regular 2D grid with 4-connected neighbours corresponds to

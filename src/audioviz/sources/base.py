@@ -4,6 +4,8 @@ import numpy as np
 
 from loguru import logger as log
 
+from audioviz.types import ArrayType
+
 class ExcitationSourceBase(ABC):
     """
     Base class for anything that injects energy into the ripple field.
@@ -80,4 +82,7 @@ class ExcitationSourceBase(ABC):
                 f"Gain for {self.name} set to {self.gain:.3f} "
                 f"({value}%)"
             )
+
+    def get_boundary_mask(self) -> Optional[ArrayType]:
+        return None  # default: no mask
 
