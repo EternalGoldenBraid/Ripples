@@ -1,0 +1,39 @@
+\documentclass[11pt]{article}
+
+% Required packages
+\usepackage{amsmath}
+\usepackage{graphicx}
+\usepackage{float}
+\usepackage{caption}  % for \caption*
+
+\begin{document}
+
+We model the display as springs on a net.  
+Each node $Z_{i,j}(t)$ can move up or down, and four tiny coupling springs pull on its nearest neighbours.  
+Together they obey the damped two-dimensional wave equation
+
+\begin{equation*}
+    \label{eq:wave}
+    \frac{\partial^2 Z_{i,j}}{\partial t^2} = c^2 \nabla Z_{i,j} - \gamma \frac{\partial Z_{i,j}}{\partial t}
+\end{equation*}
+
+By simply removing selected coupling springs we carve out boundaries,  
+so any outline (heart, body pose, etc.) can sculpt the motion.  
+In this piece a heart-shaped “muscle” sits at centre; it bends,  
+reflects and gently absorbs passing ripples.
+
+The springs are externally excited by any signal source, e.g. a microphone or plugged-in instrument.
+
+This piece is designed to be interactive. For now, we present a recorded video of a live interaction,  
+but we hope to install the fully interactive version during the exhibition month.
+
+You are welcome to install the software on your own machine via the GitHub repository linked below.  
+If you encounter any issues, feel free to raise an issue or contact us.
+
+\begin{figure}[h]
+    \centering
+    \includegraphics[width=0.2\textwidth]{Images/ripples_qr_plain.png}
+    \caption*{\texttt{https://github.com/EternalGoldenBraid/Ripples}}
+\end{figure}
+
+\end{document}
