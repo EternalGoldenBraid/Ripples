@@ -54,6 +54,7 @@ class RippleEngine:
         self.time = 0.0
 
         self.mask_set = False
+        self.boundary_masks: Dict[str, np.ndarray] = {}
 
     def add_source(self, source: ExcitationSourceBase):
         if source.name in self.sources:
@@ -71,24 +72,36 @@ class RippleEngine:
         #         self.propagator.add_boundary(mask)
         # else:
         #     log.warning(f"Source '{source.name}' does not provide a boundary mask.")
+        self.boundary_masks[source.name] = None
 
 
     def update(self, t: float):
         self.time = t
 
+        overlay = None
+        alpha = 0.0
         for name, source in self.sources.items():
             result = source(t)
             weight = 1 / max(len(self.sources), 1)
+            if isinstance(result["excitation"], np.ndarray) and self.use_gpu:
+                result["excitation"] = cp.asarray(result["excitation"])
             self.excitation[:] += weight * result["excitation"]
 
             if name == 'heart':
-                boundary_mask = result['boundary']['region']
-                overlay = result['overlay']['mask']
-                alpha = 0.1
+                if 'boundary' in result:
+                    self.boundary_masks[name] = result['boundary']['region']
+                else:
+                    self.boundary_masks[name] = None
+                if 'overlay' in result:
+                    overlay = result['overlay']['mask']
+                    alpha = 0.1
 
-        if not self.mask_set:
+        if not self.mask_set and "heart" in self.boundary_masks and self.boundary_masks["heart"] is not None:
             self.propagator.add_boundary(
-                mask=boundary_mask, boundary_id='heart_boundary',
+                mask=self.boundary_masks["heart"],
+                boundary_id='heart_boundary',
+                bc_type='dirichlet',
+                reflection_R=0.001
             )
             self.mask_set = True
 
@@ -105,7 +118,11 @@ class RippleEngine:
         self.Z[:] = self.propagator.get_state().reshape(self.resolution)
         self.excitation[:] = 0
 
-        return overlay, alpha
+        return {
+                'overlay': overlay,
+                'alpha': alpha,
+                'boundary_mask': self.propagator.boundary_mask,
+                }
 
     def get_field(self) -> Union[np.ndarray, cp.ndarray]:
         return self.Z

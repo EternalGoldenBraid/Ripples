@@ -122,11 +122,20 @@ class WavePropagatorGPU:
         self.use_matrix = use_matrix
         self.pose_graph_state = pose_graph_state
 
+        # Create circular boundary mask if shape is 2D
+        # Nodes at the boundary are True
+        if len(shape) == 2:
+            radius = min(shape) // 2
+            y, x = np.ogrid[:shape[0], :shape[1]]
+            self.boundary_mask = (x - shape[1] // 2)**2 + (y - shape[0] // 2)**2 <= radius**2
+            self.boundary_mask = self.boundary_mask.astype(bool)
+        self.boundary_mask = np.zeros(shape, dtype=bool) if len(shape) != 2 else self.boundary_mask
     
         self.c2_dt2: float = (self.c * self.dt / self.dx)**2
     
         if use_matrix:
-            self._init_matrix(shape=shape, pose_graph_state=pose_graph_state)
+            self._init_matrix(shape=shape, pose_graph_state=pose_graph_state,
+                              mask=self.boundary_mask, bc_type="dirichlet", R=0.1)
             self.laplacians: Optional[Dict[str, csr_matrix]] = {'default': self.L}
             self.current_laplacian_id: str = 'default'
         else:
@@ -139,7 +148,11 @@ class WavePropagatorGPU:
         self.Z_old = cp.zeros_like(self.Z)
         self.Z_new = cp.zeros_like(self.Z)
         
-    def add_boundary(self, mask: np.ndarray, boundary_id: str):
+    def add_boundary(self,
+                     mask: np.ndarray, 
+                     boundary_id: str,
+                     bc_type: str,
+                     reflection_R: float = 0.5):
         """
         Precomputes and stores a Laplacian for a given boundary mask.
         Also sets it as the current Laplacian.
@@ -147,13 +160,19 @@ class WavePropagatorGPU:
         assert mask.shape == self.shape, f"Boundary mask shape {mask.shape} must match simulation shape {self.shape}."
     
         log.info(f"🛠️  Precomputing Laplacian for boundary_id='{boundary_id}'...")
+
+        # Union of boundary mask and incoming mask
+        mask += self.boundary_mask
+        # Ensure mask is boolean
+        mask = mask.astype(bool)
+
     
         L_coo = apply_boundary_conditions(
             adj=build_grid_adjacency(self.shape),
             shape=self.shape,
             mask=mask,
-            bc_type="dirichlet",
-            reflection_R=0.5,
+            bc_type=bc_type,
+            reflection_R=reflection_R,
         )
         L_csr = cupyx.scipy.sparse.csr_matrix(L_coo.tocsr())
         self.laplacians[boundary_id] = L_csr
@@ -179,6 +198,8 @@ class WavePropagatorGPU:
     def _init_matrix(self,
                      shape: Tuple[int, ...],
                      mask: Optional[np.ndarray] = None,
+                     bc_type: str = "dirichlet",
+                     R: float = 1.0,
                      pose_graph_state: Optional[Any] = None):
     
         log.info("Building internal Laplacian matrix...")
@@ -199,8 +220,8 @@ class WavePropagatorGPU:
                         adj=grid_adj, shape=shape,
                         mask=mask, 
                         # bc_type="neumann"
-                        bc_type="dirichlet",
-                        reflection_R=0.5,  # Example reflection ratio
+                        bc_type=bc_type,
+                        reflection_R=R,  # Example reflection ratio
                 )
                 log.info("✅ Grid Laplacian with boundary constraints constructed.")
             else:
@@ -253,12 +274,16 @@ class WavePropagatorGPU:
         )
 
     def _apply_leapfrog_update(self, laplacian_Z: cp.ndarray) -> None:
+        # Decay
+        self.Z *= (1-1e-3)
+
         self.Z_new = (
             2 * self.Z - self.Z_old + self.c2_dt2 * laplacian_Z
             - (self.damping) * self.dt * (self.Z - self.Z_old)
         )
         self.Z_old = self.Z.copy()
         self.Z = self.Z_new.copy()
+
 
     def get_state(self) -> cp.ndarray:
         return self.Z

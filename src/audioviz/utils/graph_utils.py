@@ -89,6 +89,64 @@ def apply_boundary_conditions(
 
     return (D_mod - A_mod).tocoo()
 
+def apply_boundary_conditions(
+        adj: coo_matrix,
+        shape: Tuple[int, int],
+        mask: np.ndarray,
+        reflection_R: float = 1.0,
+        bc_type: str = "neumann",
+):
+    """
+    Build a Laplacian with custom boundary handling.
+
+    bc_type:
+      "neumann"    – scale edges that cross the wall (current behaviour)
+      "dirichlet"  – same as neumann but flip the sign inside the wall
+      "solid"      – *delete* edges that are fully inside `mask`
+                     and optionally scale only crossing edges
+    """
+    if mask.dtype != bool:
+        mask = mask.astype(bool)
+
+    H, W  = shape
+    N     = H * W
+    flat  = mask.ravel()
+
+    rows, cols = adj.row, adj.col
+    data       = adj.data.copy()
+
+    # --- decide which edges to keep/scale -----------------------------------
+    cross_wall     =  flat[rows] ^  flat[cols]      # one in, one out
+    inside_inside  =  flat[rows] &  flat[cols]      # both inside
+    outside_outside = ~(flat[rows] | flat[cols])    # both outside (never touched)
+
+    if bc_type.lower() == "solid":
+        # 1) kill interior–interior edges
+        keep = ~inside_inside
+        rows, cols, data = rows[keep], cols[keep], data[keep]
+
+        # 2) down-weight crossing edges
+        R = np.clip(reflection_R, 0.0, 1.0)
+        w = (1.0 - R) / (1.0 + R)
+        data[cross_wall[keep]] *= w
+    else:  # "neumann" / "dirichlet"
+        R = np.clip(reflection_R, 0.0, 1.0)
+        w = (1.0 - R) / (1.0 + R)
+        data[cross_wall] *= w
+        # nothing else changes
+
+    A_mod = coo_matrix((data, (rows, cols)), shape=(N, N))
+
+    # --- build (possibly boosted) degree matrix -----------------------------
+    deg = np.asarray(A_mod.sum(axis=1)).flatten().astype(np.float32)
+
+    if bc_type.lower().startswith("dir"):
+        need_boost = flat & (deg < 4.0)
+        deg[need_boost] += (4.0 - deg[need_boost])
+
+    D_mod = diags(deg, dtype=np.float32)
+    return (D_mod - A_mod).tocoo()
+
 def combine_laplacians(L1: coo_matrix, L2: coo_matrix, L_coupling: coo_matrix = None) -> coo_matrix:
     """
     Combine two Laplacians (and optional coupling Laplacian).

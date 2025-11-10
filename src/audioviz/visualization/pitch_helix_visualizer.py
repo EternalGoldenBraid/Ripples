@@ -1,9 +1,11 @@
 from typing import List
 
-from PyQt5 import QtWidgets
+from PyQt5 import QtCore, QtWidgets
 import numpy as np
 import pyqtgraph.opengl as gl
 from pyqtgraph import Vector
+
+from loguru import logger
 
 from audioviz.visualization.visualizer_base import VisualizerBase
 from audioviz.audio_processing.audio_processor import AudioProcessor
@@ -12,13 +14,19 @@ from audioviz.utils.guitar_profiles import GuitarProfile
 NOTE_NAMES: List[str] = ['C', 'C#', 'D', 'D#', 'E', 'F', 
               'F#', 'G', 'G#', 'A', 'A#', 'B']
 
-class PitchHelixVisualizer(VisualizerBase):
+# class PitchHelixVisualizer(VisualizerBase):
+class PitchHelixVisualizer(QtWidgets.QWidget):
     def __init__(self,
                  processor: AudioProcessor,
                  guitar_profile: GuitarProfile,
                  parent: QtWidgets.QWidget = None):
 
-        super().__init__(processor, parent=parent)
+        super().__init__()
+
+        self.timer = QtCore.QTimer()
+        self.timer.setInterval(16) # about 60 FPS
+        self.timer.timeout.connect(self.update_visualization)
+        self.timer.start()
 
         # Frequency mapping settings
         self.min_freq: float = guitar_profile.lowest_frequency()
@@ -31,13 +39,7 @@ class PitchHelixVisualizer(VisualizerBase):
         self.turns: int = octaves_span
 
 
-        # Init OpenGL view
-        self.view: gl.GLViewWidget = gl.GLViewWidget()
-        layout = QtWidgets.QVBoxLayout(self)
-        layout.addWidget(self.view)
-
-        self.view.opts['distance'] = 40
-        self.view.orbit(45, 60)  # Nice initial angle
+        self._init_ui()
 
         # Create the static helix backbone
         self.create_helix()
@@ -47,6 +49,16 @@ class PitchHelixVisualizer(VisualizerBase):
         self.add_note_labels()
         self.create_semitone_nodes()
         self.view.addItem(self.scatter)
+
+
+    def _init_ui(self):
+        # Init OpenGL view
+        self.view: gl.GLViewWidget = gl.GLViewWidget()
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.addWidget(self.view)
+
+        self.view.opts['distance'] = 40
+        self.view.orbit(45, 60)  # Nice initial angle
 
 
     def create_semitone_nodes(self) -> None:

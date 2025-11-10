@@ -47,22 +47,31 @@ FLAGS = dict(
     # show_spectrogram=True,
     show_spectrogram=False,
     show_ripples=True,
-    show_helix=False,
+    # show_helix=False,
+    show_helix=True,
     use_pose_graph=False,
 
+    # use_audio_excitation=True,
+    # use_heart_video=True,
+    # use_synthetic=False,
+
     use_audio_excitation=True,
-    use_heart_video=True,
+    use_heart_video=False,
     use_synthetic=False,
 
-    # use_audio_excitation=True,
+    # use_audio_excitation=False,
     # use_heart_video=False,
+    # use_synthetic=True,
+
+    # use_audio_excitation=True,
+    # use_heart_video=True,
     # use_synthetic=True,
 )
 
 # HEART_VIDEO_PATH = Path("Data/GeneratedHearts/test_e050_p002.avi")
 person_id: str = "002"
-# epoch_id: str = "400"
-epoch_id: str = "005"
+epoch_id: str = "400"
+# epoch_id: str = "005"
 HEART_VIDEO_PATH = Path(f"Data/RippleHearts/vids/test_e{epoch_id}_p{person_id}.avi")
 HEART_ECG_PATH = Path(f"Data/RippleHearts/ecg_{person_id}.npy")
 WAV_PATH         = Path("data/test.wav")
@@ -75,17 +84,28 @@ N_FFT      = 256
 WINDOW_MS  = 20
 HOP_RATIO  = 1 / 4
 
-USE_3D = True  # or False
-# USE_3D = False
+# USE_3D = True  # or False
+USE_3D = False
 
 RIPPLE_CONF = dict(
-    # plane_size_m=(150., 150.),
+
+    plane_size_m=(.1, .2),
+    dx=7.5e-5,
+
+    # plane_size_m=(1000., 1000.),
+    # dx=1.0,
 
     # plane_size_m=(100., 100.),
-    plane_size_m=(50., 50.),
+    # # plane_size_m=(100., 200.),
+    # dx=1e-1,
+
+    # 3D
+    # plane_size_m=(100., 100.),
+    # dx=5e-1,
+
     # plane_size_m=(100., 100.),
     # dx=1e-1,
-    dx=5e-2,
+
     speed=10.0,
     damping=0.90,
     use_gpu=True,
@@ -106,7 +126,8 @@ AUDIO_EXCITATION_CONF = dict(
 )
 
 HEART_EXCITATION_CONF = dict(
-    source=HEART_VIDEO_PATH,
+    video_path=HEART_VIDEO_PATH,
+    ecg_path=HEART_ECG_PATH,
     position=(0.5, 0.5),
     amplitude=1.0,
 )

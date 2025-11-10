@@ -83,14 +83,21 @@ class ControlPanel(QtWidgets.QWidget):
             self.engine.propagator.damping = val
         label.setText(f"Damping: {val:.3f}")
         print(f"✅ Updated damping to {val:.3f}")
-    
+
     def update_speed(self, val, label):
         self.engine.speed = val
-        if hasattr(self.engine.propagator, "c"):
-            self.engine.propagator.c = val
-            self.engine.propagator.c2_dt2 = (val * self.engine.dt / self.engine.dx)**2
+        prop = self.engine.propagator
+    
+        # --- recompute stable dt (same formula as ctor) ---
+        new_dt = (self.engine.dx / val) * (1/np.sqrt(2)) * self.engine.safe_factor
+    
+        # propagate the change everywhere
+        self.engine.dt        = new_dt
+        prop.dt               = new_dt
+        prop.c                = val
+        prop.c2_dt2           = (val * new_dt / self.engine.dx)**2
+    
         label.setText(f"Speed: {val:.1f}")
-        print(f"✅ Updated speed to {val:.1f}")
 
     def add_source_controls(self, source: ExcitationSourceBase) -> None:
         group = QtWidgets.QGroupBox(source.name)

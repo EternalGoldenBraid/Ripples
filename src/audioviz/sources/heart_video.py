@@ -32,16 +32,27 @@ class HeartVideoExcitation(ExcitationSourceBase):
         Choose np or cp depending on CPU / GPU mode.
     name : str
         Source label shown in UI.
+    mode : str
+        "contour_ecg_edge"  → contour + ECG edge
+        "contour_ecg_center"→ contour + ECG center
+        "contour_only"      → contour only, no ECG
+        "contour_no_excitation" → contour, no ECG, no amplitude
+        Default is "contour_ecg_edge".
     """
 
     def __init__(self,
-                 source : Union[str, Path, np.ndarray],
+                 video_path: Union[str, Path],
                  backend,
                  resolution : Tuple[int, int],
+                 ecg_path: Optional[Union[str, Path]] = None,
                  amplitude: float = 0.0,
                  position   : Tuple[float, float] = (0.5, 0.5),
                  name       : str = "heart",
                  audio_processor: Optional[AudioProcessor] = None,
+                 # mode: str = "contour_ecg_edge"
+                 mode: str = "contour_ecg_center"
+                 # mode: str = "contour_only"
+                 # mode: str = "contour_no_excitation"
                  ):
 
         super().__init__(name=name, nominal_peak=1)
@@ -49,15 +60,17 @@ class HeartVideoExcitation(ExcitationSourceBase):
         self.frames: List[Union[np.ndarray, cp.ndarray]] = []
         self.frame: Optional[ArrayType] = None
 
-        self.xp = backend
+        # self.xp = backend
+        self.xp = np # For now do all in CPU here due to opencv
         self.output_resolution = resolution
         self.position   = position              # normalised (x, y)
         self.audio_processor = audio_processor
         self.follow_audio: bool = True if audio_processor is not None else False
+        self.mode: str = mode
 
-        self.load_video(source) 
+        self.load_video(video_path) 
         self.video_resolution: Tuple[int, int] = (self.frames[0].shape[0], self.frames[0].shape[1])  # (Hf, Wf)
-        self.out: Union[np.ndarray, cp.ndarray] = self.xp.zeros(self.output_resolution, dtype=self.xp.float32)
+        self.out: ArrayType = self.xp.zeros(self.output_resolution, dtype=self.xp.float32)
         self.num_frames = len(self.frames)
         assert self.fps is not None, "Video FPS must be set!"
         assert self.num_frames > 0, "No frames loaded from video source!"
@@ -69,8 +82,31 @@ class HeartVideoExcitation(ExcitationSourceBase):
             """
         )
 
+        if ecg_path is not None:
+            self.load_ecg(ecg_path)
+
+        self.frame_idx: int = 0
+
         self.amplitude: float = amplitude
-        self._prev_mask: Optional[Union[np.ndarray, cp.ndarray]] = None
+
+        self._edge_buffer: ArrayType = self.xp.zeros(self.output_resolution, dtype=self.xp.uint8)
+        self._filled_buffer: ArrayType = self.xp.zeros(self.output_resolution, dtype=self.xp.uint8)
+
+    def load_ecg(self, ecg_path: Union[str, Path]) -> None:
+        self.ecg = np.load(ecg_path).astype(np.float32)
+        if len(self.ecg) != self.num_frames:
+            log.warning(
+                f"""
+                ECG length {len(self.ecg)} does not match number of video frames {self.num_frames}
+                """
+            )
+            if len(self.ecg) < self.num_frames:
+                self.ecg = np.pad(self.ecg, (0, self.num_frames - len(self.ecg)), mode='edge')
+                log.warning( f"Padding ECG to match video frames: new length {len(self.ecg)}")
+            elif len(self.ecg) > self.num_frames:
+                self.ecg = self.ecg[:self.num_frames]
+                log.warning( f"Truncating ECG to match video frames: new length {len(self.ecg)}")
+        log.info(f"✅ ECG loaded with {len(self.ecg)} samples.")
 
     def load_video(self, source: Union[str, Path, np.ndarray]):
 
@@ -156,7 +192,7 @@ class HeartVideoExcitation(ExcitationSourceBase):
     def _set_pos_y(self, y: float): self.position = (self.position[0], y)
 
 
-    def extract_mask(self, frame, mode: str = "raw", threshold: float = 0.5) -> ArrayType:
+    def extract_mask(self, frame, mode: str = "raw", threshold: float = 0.0) -> ArrayType:
         """
         Returns a static binary mask from the current frame.
         
@@ -208,7 +244,7 @@ class HeartVideoExcitation(ExcitationSourceBase):
     
             contours, _ = cv2.findContours(bin_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
             filled = np.zeros_like(bin_mask, dtype=np.uint8)
-            cv2.drawContours(filled, contours, -1, 1, thickness=-1)  # fill all contours
+            cv2.drawContours(filled, contours, -1, 1, thickness=1)
     
             return filled.astype(bool)
     
@@ -216,7 +252,7 @@ class HeartVideoExcitation(ExcitationSourceBase):
             raise ValueError(f"Unknown mode '{mode}' for extract_mask")
 
     # ---------------------------------------------------------------- runtime
-    def __call__(self, t: float, channel_idx=1) -> Dict[str, Any]:
+    def __call___old(self, t: float, channel_idx=1) -> Dict[str, Any]:
         # freq = (self.audio_processor.current_top_k_frequencies[channel_idx][0] \
         #         if self.follow_audio else self.manual_freq)
         #
@@ -285,16 +321,174 @@ class HeartVideoExcitation(ExcitationSourceBase):
                 'boundary': {'region': edge_mask},
         }
 
-    def get_boundary_mask(self) -> ArrayType:
-        shape = self.output_resolution
-        self.mask = np.zeros(shape, dtype=bool)
-        # Wall max a circle of ones in the center of the grid
-        radius = min(shape) // 4  # Example radius
-        center = (shape[0] // 2, shape[1] // 2)
-        # Set to ones on the perimeter of the circle not on the inside
-        for i in range(shape[0]):
-            for j in range(shape[1]):
-                if (i - center[0])**2 + (j - center[1])**2 <= radius**2:
-                    self.mask[i, j] = True
+    def __call__(self, t: float, channel_idx=1) -> Dict[str, Any]:
+        self.out[:] = 0.0
+        self.frame_idx += 1
+        self.frame_idx %= self.num_frames
 
-        return self.mask
+        self._frame_buffer[:] = next(self.frame_iter)
+    
+        if self.mode == "contour_only":
+            return self._excite_from_contour_only()
+    
+        elif self.mode == "contour_ecg_edge":
+            assert hasattr(self, "ecg"), "ECG data must be loaded for 'contour_ecg_edge' mode"
+            return self._excite_ecg_edge()
+    
+        elif self.mode == "contour_ecg_center":
+            assert hasattr(self, "ecg"), "ECG data must be loaded for 'contour_ecg_center' mode"
+            return self._excite_ecg_center()
+    
+        else:
+            raise ValueError(f"Unknown mode '{self.mode}'")
+
+    def extract_masks(
+        self,
+        frame: np.ndarray,
+        threshold: float = 0.0,
+        edge_thickness: int = 3,) -> Dict[str, ArrayType]:
+        """Return filled heart mask **and** edge mask for a single grayscale frame.
+
+        1. Thresholds + recenters frame → `filled` boolean mask (H, W).
+        2. Finds external contours → draws into reusable `_edge_buffer` with the requested thickness.
+
+        Returns
+        -------
+        dict with keys:
+            'filled' : bool ndarray (H, W)
+            'edge'   : bool ndarray (H, W)
+        """
+        # ---------- step 1: filled mask (resize + place) ----------
+        H_out, W_out = self.output_resolution
+        mask = self.xp.asarray(frame, dtype=self.xp.float32)
+
+        target_w = int(W_out * 0.125)
+        target_h = int(mask.shape[0] * target_w / mask.shape[1])
+        mask_resized = resize_array(mask, target_h, target_w, xp=self.xp)
+        mask_resized = self.xp.asnumpy(mask_resized) if self.xp != np else mask_resized
+
+        cx = int(self.position[1] * (W_out - 1))
+        cy = int(self.position[0] * (H_out - 1))
+        h, w = mask_resized.shape
+        top    = max(0, cy - h // 2)
+        left   = max(0, cx - w // 2)
+        bottom = min(H_out, top  + h)
+        right  = min(W_out, left + w)
+
+        filled = self._filled_buffer
+        filled[:] = 0
+        filled[top:bottom, left:right] = (mask_resized[:bottom-top, :right-left] > threshold).astype(np.uint8)
+
+        # ---------- step 2 : edge mask (largest, hole-free) ----------
+        edge   = self._edge_buffer      # reusable uint8 buffers (0/1)
+        filled = self._filled_buffer    #    “
+        edge[:]   = 0
+        # keep filled as it is – we only need its size
+        
+        # 1. find *all* contours, including internal rings
+        contours, _ = cv2.findContours(
+            filled,                    # binary image (uint8 0/1)
+            cv2.RETR_EXTERNAL,         # only outer boundaries
+            cv2.CHAIN_APPROX_SIMPLE)
+        
+        if contours:
+            # 2. pick the biggest one
+            biggest = max(contours, key=cv2.contourArea)
+        
+            # 3. paint it *solid* into `filled` (wipes holes)
+            filled[:] = 0
+            cv2.drawContours(filled, [biggest], -1, 1, thickness=-1)   # -1  → fill
+        
+            # 4. draw only the edge into `edge`
+            cv2.drawContours(edge,   [biggest], -1, 1, thickness=edge_thickness)
+        
+        # convert to bool for the caller
+        edge_bool   = edge.astype(bool)
+        filled_bool = filled.astype(bool)
+        return {"filled": filled_bool, "edge": edge_bool}
+
+ # ---------------------------------------------------------------- excitation modes
+    def _excite_ecg_edge(self) -> Dict[str, Any]:
+        masks = self.extract_masks(self._frame_buffer[:])
+        edge_bool = masks["edge"]
+        edge_f32 = edge_bool.astype(np.float32)
+
+        # Smooth once; reuse buffer
+        edge_f32 = cv2.GaussianBlur(edge_f32, (3, 3), sigmaX=1)
+        edge_f32 -= edge_f32.mean()
+        max_val = self.xp.abs(edge_f32).max()
+        if max_val > 0:
+            edge_f32 /= max_val
+
+        amp = self.ecg[self.frame_idx]
+        self.out[:] = self.amplitude * amp * edge_f32
+        return {
+            "excitation": self.out,
+            "overlay": {"mask": edge_f32},
+            "boundary": {"region": masks["filled"]},
+        }
+
+    def _excite_ecg_center(self) -> Dict[str, Any]:
+        masks = self.extract_masks(self._frame_buffer[:])
+        filled = masks["filled"]
+        edge   = masks["edge"]
+
+        ys, xs = np.nonzero(filled)
+        if len(xs) == 0:
+            return {
+                "excitation": self.out,
+                "overlay": {"mask": np.zeros_like(self.out)},
+                "boundary": {"region": edge},
+            }
+
+        cx = int(xs.mean()); cy = int(ys.mean())
+        sigma = np.max(np.sqrt((xs - cx)**2 + (ys - cy)**2)) / 3.0
+
+        if not hasattr(self, "yy"):
+            H, W = self.output_resolution
+            self.yy, self.xx = np.meshgrid(np.arange(H), np.arange(W), indexing="ij")
+        dx = self.xx - cx; dy = self.yy - cy
+        gaussian = np.exp(-(dx*dx + dy*dy) / (2 * sigma**2))
+        gaussian *= filled
+
+        amp = self.ecg[self.frame_idx]
+        excitation = gaussian * amp * self.amplitude
+
+        overlay = gaussian.astype(np.float32)
+        overlay -= overlay.mean(); max_val = np.abs(overlay).max()
+        if max_val > 0:
+            overlay /= max_val
+
+        self.out[:] = self.xp.asarray(excitation, dtype=self.xp.float32)
+        return {
+            "excitation": self.out,
+            "overlay": {"mask": overlay},
+            "boundary": {"region": edge},
+        }
+
+    def _excite_from_contour_only(self) -> Dict[str, Any]:
+        """Excite *only* along the heart boundary (edge).
+
+        The filled interior is ignored – we press a thin wall onto the water surface, 
+        like a cookie‑cutter.  The edge mask is optionally blurred so the excitation 
+        isn’t a single‑pixel spike.
+        """
+        masks = self.extract_masks(self._frame_buffer[:])
+        edge_bool = masks["edge"]   # boolean mask (H, W)
+
+        # Convert to float32 and smooth a little so the wave starts gently
+        edge_f32 = edge_bool.astype(np.float32)
+        edge_f32 = cv2.GaussianBlur(edge_f32, (3, 3), sigmaX=1)
+        edge_f32 -= edge_f32.mean()
+        max_val = np.abs(edge_f32).max()
+        if max_val > 0:
+            edge_f32 /= max_val
+
+        # Write excitation directly to GPU/CPU buffer
+        self.out[:] = self.amplitude * self.xp.asarray(edge_f32, dtype=self.xp.float32)
+
+        return {
+            "excitation": self.out,
+            "overlay": {"mask": edge_f32},
+            "boundary": {"region": edge_bool},
+        }
